@@ -1,0 +1,4 @@
+opencv-python~=4.13.0.92
+ultralytics~=8.4.37
+dotenv~=0.9.9
+python-dotenv~=1.2.2
