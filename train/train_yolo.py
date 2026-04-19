@@ -1,4 +1,4 @@
-from roboflow import Roboflow
+import os
 from ultralytics import YOLO
 
 from config.settings import cfg
@@ -6,29 +6,29 @@ from config.settings import cfg
 
 def main():
     # ==========================================
-    # 1. 配置 Roboflow
+    # 1. 配置本地数据集路径
     # ==========================================
-    print(">>> 正在从 Roboflow 拉取数据集...")
-    rf = Roboflow(api_key=cfg.ROBOFLOW_API_KEY)
+    local_data_yaml = "datasets/data.yaml"  # 替换为你的 CVAT 导出 data.yaml.yaml 的实际路径
 
-    project = rf.workspace(cfg.ROBOFLOW_WORKSPACE_NAME).project(cfg.ROBOFLOW_PROJECT_NAME)
-    version = project.version(cfg.ROBOFLOW_PROJECT_VERSION)
+    if not os.path.exists(local_data_yaml):
+        raise FileNotFoundError(f"找不到数据集配置文件，请检查路径: {local_data_yaml}")
 
-    dataset = version.download(cfg.VERSION_FOR_DOWNLOAD_DATASET)
-    print(f">>> 数据集已下载至: {dataset.location}")
+    print(f">>> 已定位本地数据集: {local_data_yaml}")
 
     # ==========================================
-    # 2. 初始化 YOLO 模型
+    # 2. 初始化适合边缘部署的轻量化模型
     # ==========================================
-    print(f">>> 正在初始化 YOLO 模型: {cfg.MODEL_WEIGHTS}...")
-    model = YOLO(cfg.MODEL_WEIGHTS)
+    # 边缘部署首选 'n' (Nano) 模型，兼顾极高的运行速度和极低的资源占用
+    edge_weights = "yolo11s.pt"  # 如果你想稍微提升精度且设备跑得动，可以改成 "yolo11s.pt"
+    print(f">>> 正在初始化边缘部署专供模型: {edge_weights}...")
+    model = YOLO(edge_weights)
 
     # ==========================================
-    # 3. 开始模型训练，可以添加更多参数
+    # 3. 开始模型训练
     # ==========================================
     print(">>> 开始训练...")
     _ = model.train(
-        data=f"{dataset.location}/data.yaml",
+        data=local_data_yaml,
         epochs=cfg.EPOCHS,
         patience=cfg.PATIENCE,
         batch=cfg.BATCH_SIZE,
@@ -39,10 +39,11 @@ def main():
     )
 
     # ==========================================
-    # 4. 导出模型
+    # 4. 导出模型 (针对边缘端的特殊提醒)
     # ==========================================
     print(f"\n>>> 训练完成！正在导出 {cfg.EXPORT_FORMAT} 格式...")
-    model.export(format=cfg.EXPORT_FORMAT, half=True)
+    # half=True (FP16半精度) 非常适合边缘端，能提升速度并减少内存占用
+    model.export(format=cfg.EXPORT_FORMAT, half=False)
     print(">>> 导出完毕！")
 
 
