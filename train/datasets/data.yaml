@@ -1,0 +1,26 @@
+"""
+示例目录标记：
+train:
+- day/images/train
+- night/images/train
+val:
+- day/images/val
+- night/images/val
+"""
+
+# 这里的路径是相对于执行训练脚本的位置
+path: ./datasets
+
+train:
+  - images/train
+
+val:
+  - images/val
+
+# 四类标签
+nc: 4
+names:
+  0: bucket-empty
+  1: bucket-full
+  2: truck-empty
+  3: truck-full
