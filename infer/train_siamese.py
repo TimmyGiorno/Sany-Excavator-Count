@@ -1,11 +1,8 @@
-# train.py
 import os
 import random
-import json
-from pathlib import Path
 import torch
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from siamese_config import config

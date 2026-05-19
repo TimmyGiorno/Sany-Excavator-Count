@@ -3,7 +3,6 @@ import io
 
 import numpy as np
 import torch
-from PIL import Image
 
 # 强制将标准输出和错误输出设置为 utf-8
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
@@ -541,11 +540,10 @@ class VideoTracker:
 
 
 if __name__ == "__main__":
-    # TEST_VIDEO = "./JFSK_20251230_165914_N1_00.mp4"  # 输入的测试视频
-    TEST_VIDEO = "E:/data/mp4/JFSK_20251230_140914_N1_00.mp4"
-    TRAINED_MODEL = "./best.pt"  # 训练出的最佳权重
-    OUTPUT_VIDEO = "test3.mp4"  # 输出的视频名
-    SIAMESE_MODEL_PATH = "./runs/siamese_model/attention_siamese_best.pth"
+    TEST_VIDEO = "./tmp_files/test_video.mp4" # 输入的测试视频
+    TRAINED_MODEL = "./tmp_files/best.pt"  # 训练出的最佳权重
+    OUTPUT_VIDEO = "./tmp_files/output.mp4"  # 输出的视频名
+    SIAMESE_MODEL_PATH = "./tmp_files/attention_siamese_best.pth"
 
     # 创建跟踪器实例
     tracker = VideoTracker(
@@ -553,7 +551,7 @@ if __name__ == "__main__":
         model_path=TRAINED_MODEL,
         output_path=OUTPUT_VIDEO,
         siamese_model_path=SIAMESE_MODEL_PATH,
-        tracker_config="bytetrack.yaml"
+        tracker_config="bytetrack.yaml",
     )
 
     # 运行推理
