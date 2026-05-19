@@ -209,3 +209,4 @@ __marimo__/
 .idea/
 
 _files/
+/rknn_sim_deploy/tmp_files/
