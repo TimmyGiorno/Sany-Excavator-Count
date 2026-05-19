@@ -1,6 +1,5 @@
 import cv2
 import os
-import typing
 
 def extract_frames(video_path: str, output_dir: str, interval: int=10):
     """
@@ -15,12 +14,12 @@ def extract_frames(video_path: str, output_dir: str, interval: int=10):
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"错误: 无法打开视频文件 '{video_path}'，请检查路径是否正确。")
+        print(f"[train:datasets:extract_frames] 错误: 无法打开视频文件 '{video_path}'，请检查路径是否正确。")
         return
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    print(f"成功打开视频。总帧数: {total_frames}")
-    print(f"准备将图片导出至: {output_dir}")
+    print(f"[train:datasets:extract_frames] 成功打开视频。总帧数: {total_frames}")
+    print(f"[train:datasets:extract_frames] 准备将图片导出至: {output_dir}")
 
     frame_index = 0  # 视频当前的真实帧数
     saved_count = 0  # 实际保存下来的图片数量
@@ -31,19 +30,19 @@ def extract_frames(video_path: str, output_dir: str, interval: int=10):
             break
 
         if frame_index % interval == 0:
-            filename = f"frame_{frame_index:06d}.png"
+            filename = f"[train:datasets:extract_frames] frame_{frame_index:06d}.png"
             output_path = os.path.join(output_dir, filename)
 
             cv2.imwrite(output_path, frame)
             saved_count += 1
 
             if saved_count % 50 == 0:
-                print(f"已保存 {saved_count} 张图片 (当前正处理视频第 {frame_index}/{total_frames} 帧)...")
+                print(f"[train:datasets:extract_frames] 已保存 {saved_count} 张图片 (当前正处理视频第 {frame_index}/{total_frames} 帧)...")
 
         frame_index += 1
 
     cap.release()
-    print(f"抽取完成！视频共 {total_frames} 帧，按每 {interval} 帧抽 1 张，最终得到 {saved_count} 张图片。")
+    print(f"[train:datasets:extract_frames] 抽取完成！视频共 {total_frames} 帧，按每 {interval} 帧抽 1 张，最终得到 {saved_count} 张图片。")
 
 
 if __name__ == "__main__":
