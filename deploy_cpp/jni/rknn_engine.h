@@ -50,4 +50,3 @@ private:
 };
 
 #endif /* RKNN_ENGINE_H */
-
