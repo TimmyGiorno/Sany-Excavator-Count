@@ -1,0 +1,42 @@
+@echo off
+REM ============================================================
+REM  build_android.bat -- ndk-build for RK3568 Android
+REM  Usage: scripts\build_android.bat
+REM ============================================================
+setlocal enabledelayedexpansion
+
+if "%NDK_HOME%"=="" (
+    echo [ERROR] NDK_HOME is not set.
+    echo   set NDK_HOME=C:\Users\GT15\AppData\Local\Android\Sdk\ndk\25.2.9519653
+    exit /b 1
+)
+
+set "PROJECT_DIR=%~dp0.."
+set "JNI_DIR=%PROJECT_DIR%\jni"
+set "OUTPUT_DIR=%PROJECT_DIR%\output\arm64-v8a"
+
+if not exist "%PROJECT_DIR%\3rdparty\rknn\librknnrt.so" (
+    echo [WARN] librknnrt.so not found in 3rdparty\rknn\. Pull from device:
+    echo   adb pull /vendor/lib64/librknnrt.so deploy_cpp\3rdparty\rknn\
+    echo.
+)
+
+echo [INFO] Building with ndk-build...
+pushd "%JNI_DIR%"
+call "%NDK_HOME%\ndk-build.cmd" NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk NDK_APPLICATION_MK=Application.mk
+set BR=%ERRORLEVEL%
+popd
+if %BR% neq 0 exit /b %BR%
+
+mkdir "%OUTPUT_DIR%" 2>nul
+copy /Y "%PROJECT_DIR%\libs\arm64-v8a\libexcavator_algo.so" "%OUTPUT_DIR%\"
+
+if exist "%NDK_HOME%\toolchains\llvm\prebuilt\windows-x86_64\sysroot\usr\lib\aarch64-linux-android\libc++_shared.so" (
+    copy /Y "%NDK_HOME%\toolchains\llvm\prebuilt\windows-x86_64\sysroot\usr\lib\aarch64-linux-android\libc++_shared.so" "%OUTPUT_DIR%\"
+)
+
+echo.
+echo ============================================================
+echo   Build complete: %OUTPUT_DIR%
+echo ============================================================
+
