@@ -210,4 +210,5 @@ __marimo__/
 
 _files/
 /rknn_sim_deploy/tmp_files/
-/infer/dumping_truck_extracts/
+
+/deploy_cpp/3rdparty
