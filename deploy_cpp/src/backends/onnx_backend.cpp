@@ -3,16 +3,7 @@
 #include "../../include/inference_engine.h"
 #include <cstdio>
 
-/*
-   ONNX Runtime backend (stub).
-   To activate:
-     1. Install ONNX Runtime SDK in 3rdparty/onnxruntime/<platform>/
-     2. Build with -DUSE_ONNX=ON
-     3. Uncomment the #include <onnxruntime_cxx_api.h> below
-     4. Replace stub bodies with real ONNX Runtime API calls
-*/
-
-// #include <onnxruntime_cxx_api.h>
+#include <onnxruntime_cxx_api.h>
 
 class OnnxBackend : public IBackend {
 public:

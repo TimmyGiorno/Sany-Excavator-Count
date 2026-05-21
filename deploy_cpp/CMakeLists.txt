@@ -52,28 +52,17 @@ include_directories(
 # target_link_libraries(excavator_algo rknnrt log android)
 
 
-# Target: test_video
-if(WIN32 OR UNIX)
-    set(THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty")
+# Target: test_video  (Windows desktop performance test)
+set(THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty")
 
-    add_executable(test_video
-        src/main.cpp
-        ${ENGINE_SRC}
-    )
+add_executable(test_video
+    src/main.cpp
+    ${ENGINE_SRC}
+)
 
-    if(MSVC)
-        set(OpenCV_DIR "${THIRD_PARTY_DIR}/opencv/windows_x64/build/x64/vc16/lib")
-        find_package(OpenCV 4 REQUIRED)
-        set(ORT_DIR "${THIRD_PARTY_DIR}/onnxruntime/windows_x64")
-        include_directories(${ORT_DIR}/include)
-        link_directories(${ORT_DIR}/lib)
-        target_link_libraries(test_video ${OpenCV_LIBS} onnxruntime)
-    endif()
-
-    if(USE_RKNN)
-        set(RKNN_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/rknn")
-        add_library(rknnrt SHARED IMPORTED)
-        set_target_properties(rknnrt PROPERTIES IMPORTED_LOCATION "${RKNN_LIB_DIR}/librknnrt.so")
-        target_link_libraries(test_video rknnrt)
-    endif()
-endif()
+set(OpenCV_DIR "${THIRD_PARTY_DIR}/opencv/windows_x64/build/x64/vc16/lib")
+find_package(OpenCV 4 REQUIRED)
+set(ORT_DIR "${THIRD_PARTY_DIR}/onnxruntime/windows_x64")
+include_directories(${ORT_DIR}/include)
+set(ONNXRUNTIME_LIB "${ORT_DIR}/lib/onnxruntime.lib")
+target_link_libraries(test_video ${OpenCV_LIBS} ${ONNXRUNTIME_LIB})
