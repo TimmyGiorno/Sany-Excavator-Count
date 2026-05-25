@@ -8,7 +8,8 @@ APP_PLATFORM := android-29
 APP_STL := c++_shared
 
 # Build release by default
-APP_OPTIM := release
+APP_OPTIM := debug
+APP_CFLAGS += -g -O0
 
 # Enable exceptions + RTTI
 APP_CPPFLAGS += -frtti -fexceptions

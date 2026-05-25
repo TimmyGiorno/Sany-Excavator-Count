@@ -6,7 +6,7 @@ import numpy as np
 # I/O 参数
 MODEL_PATH = './best.onnx' # ONNX 模型路径
 DATASET_PATH = './dataset.txt' # 用于量化的校准数据集集
-INPUT_VIDEO = './JFSK_20251230_110914_N1_00.mp4' # 输入的测试视频
+INPUT_VIDEO = './test_video.mp4' # 输入的测试视频
 OUTPUT_RKNN = './yolov_model_rk3568.rknn'
 
 # 与 train:datasets:data.yaml 中的保持一致
@@ -178,7 +178,7 @@ if __name__ == '__main__':
     total_infer_time = 0.0
 
     # 循环读取视频帧，如果要读完，就改成 while True
-    while frame_count <= 100:
+    while True:
         ret, frame = cap.read()
         if not ret:
             print("Video reached the end or failed to read.")
@@ -186,7 +186,7 @@ if __name__ == '__main__':
             
         frame_count += 1
 
-        img, ratio, (dw, dh) = letterbox(frame, new_shape=(640, 640))
+        img, ratio, (dw, dh) = letterbox(frame, new_shape=(480, 480))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) # 颜色空间转换 BGR -> RGB
         img = np.expand_dims(img, axis=0) # 增加 Batch 维度
 

@@ -27,3 +27,25 @@ LOCAL_LDLIBS := -llog -landroid
 LOCAL_SHARED_LIBRARIES := rknnrt
 
 include $(BUILD_SHARED_LIBRARY)
+
+# ---------- test_excavator (standalone executable for adb shell debugging) ----------
+include $(CLEAR_VARS)
+LOCAL_MODULE := test_excavator
+
+LOCAL_SRC_FILES := \
+    test_main.cpp \
+    ../src/inference_engine.cpp \
+    ../src/backends/rknn_backend.cpp \
+    ../src/excavator_tracker.cpp
+
+LOCAL_C_INCLUDES := \
+    $(LOCAL_PATH) \
+    $(LOCAL_PATH)/../include
+
+LOCAL_CFLAGS := -std=c++17 -Wall -O0 -g -fPIC -DUSE_RKNN
+
+LOCAL_LDLIBS := -llog -landroid
+
+LOCAL_SHARED_LIBRARIES := rknnrt
+
+include $(BUILD_EXECUTABLE)

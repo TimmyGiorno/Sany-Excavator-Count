@@ -6,9 +6,7 @@ REM ============================================================
 setlocal enabledelayedexpansion
 
 if "%NDK_HOME%"=="" (
-    echo [ERROR] NDK_HOME is not set.
-    echo   set NDK_HOME=C:\Users\GT15\AppData\Local\Android\Sdk\ndk\25.2.9519653
-    exit /b 1
+    set NDK_HOME=C:\Users\GT15\AppData\Local\Android\Sdk\ndk\30.0.14904198
 )
 
 set "PROJECT_DIR=%~dp0.."
@@ -29,14 +27,18 @@ popd
 if %BR% neq 0 exit /b %BR%
 
 mkdir "%OUTPUT_DIR%" 2>nul
+
 copy /Y "%PROJECT_DIR%\libs\arm64-v8a\libexcavator_algo.so" "%OUTPUT_DIR%\"
 
-if exist "%NDK_HOME%\toolchains\llvm\prebuilt\windows-x86_64\sysroot\usr\lib\aarch64-linux-android\libc++_shared.so" (
-    copy /Y "%NDK_HOME%\toolchains\llvm\prebuilt\windows-x86_64\sysroot\usr\lib\aarch64-linux-android\libc++_shared.so" "%OUTPUT_DIR%\"
-)
+copy /Y "%PROJECT_DIR%\obj\local\arm64-v8a\test_excavator" "%OUTPUT_DIR%\"
+
+copy /Y "%PROJECT_DIR%\libs\arm64-v8a\libc++_shared.so" "%OUTPUT_DIR%\"
 
 echo.
 echo ============================================================
 echo   Build complete: %OUTPUT_DIR%
+echo   Files:
+echo     libexcavator_algo.so  (JNI library)
+echo     test_excavator        (adb shell test tool)
+echo     libc++_shared.so
 echo ============================================================
-

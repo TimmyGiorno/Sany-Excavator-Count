@@ -47,22 +47,24 @@ include_directories(
 
 
 # Target: excavator_algo  (shared library, Android via CMake)
-# add_library(excavator_algo SHARED ${ENGINE_SRC} jni/excavator_jni.cpp)
-# target_compile_options(excavator_algo PRIVATE -Wall -O2 -fPIC -fexceptions -frtti)
-# target_link_libraries(excavator_algo rknnrt log android)
+add_library(excavator_algo SHARED
+        ${ENGINE_SRC}
+        jni/excavator_jni.cpp)
+target_compile_options(excavator_algo PRIVATE -Wall -O2 -fPIC -fexceptions -frtti)
+target_link_libraries(excavator_algo rknnrt log android)
 
 
 # Target: test_video  (Windows desktop performance test)
-set(THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty")
-
-add_executable(test_video
-    src/main.cpp
-    ${ENGINE_SRC}
-)
-
-set(OpenCV_DIR "${THIRD_PARTY_DIR}/opencv/windows_x64/build/x64/vc16/lib")
-find_package(OpenCV 4 REQUIRED)
-set(ORT_DIR "${THIRD_PARTY_DIR}/onnxruntime/windows_x64")
-include_directories(${ORT_DIR}/include)
-set(ONNXRUNTIME_LIB "${ORT_DIR}/lib/onnxruntime.lib")
-target_link_libraries(test_video ${OpenCV_LIBS} ${ONNXRUNTIME_LIB})
+#    set(THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty")
+#
+#    add_executable(test_video
+#        src/main.cpp
+#        ${ENGINE_SRC}
+#    )
+#
+#    set(OpenCV_DIR "${THIRD_PARTY_DIR}/opencv/windows_x64/build/x64/vc16/lib")
+#    find_package(OpenCV 4 REQUIRED)
+#    set(ORT_DIR "${THIRD_PARTY_DIR}/onnxruntime/windows_x64")
+#    include_directories(${ORT_DIR}/include)
+#    set(ONNXRUNTIME_LIB "${ORT_DIR}/lib/onnxruntime.lib")
+#    target_link_libraries(test_video ${OpenCV_LIBS} ${ONNXRUNTIME_LIB})
