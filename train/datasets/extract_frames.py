@@ -1,7 +1,8 @@
 import cv2
 import os
 
-def extract_frames(video_path: str, output_dir: str, interval: int=10):
+
+def extract_frames(video_path: str, output_dir: str, interval: int = 10):
     """
     将视频按帧拆分为图片，用于训练 YOLO 模型。
 
@@ -30,23 +31,43 @@ def extract_frames(video_path: str, output_dir: str, interval: int=10):
             break
 
         if frame_index % interval == 0:
-            filename = f"[train:datasets:extract_frames] frame_{frame_index:06d}.png"
+            filename = f"frame_{frame_index:06d}.png"
             output_path = os.path.join(output_dir, filename)
 
-            cv2.imwrite(output_path, frame)
+            success = cv2.imwrite(output_path, frame)
+            # print(f"保存 {'成功' if success else '失败'}: {output_path}")
             saved_count += 1
 
             if saved_count % 50 == 0:
-                print(f"[train:datasets:extract_frames] 已保存 {saved_count} 张图片 (当前正处理视频第 {frame_index}/{total_frames} 帧)...")
+                print(
+                    f"[train:datasets:extract_frames] 已保存 {saved_count} 张图片 (当前正处理视频第 {frame_index}/{total_frames} 帧)...")
 
         frame_index += 1
 
     cap.release()
-    print(f"[train:datasets:extract_frames] 抽取完成！视频共 {total_frames} 帧，按每 {interval} 帧抽 1 张，最终得到 {saved_count} 张图片。")
+    print(
+        f"[train:datasets:extract_frames] 抽取完成！视频共 {total_frames} 帧，按每 {interval} 帧抽 1 张，最终得到 {saved_count} 张图片。")
 
 
+# if __name__ == "__main__":
+#     VIDEO_FILE = "E:/data/datasetsV1.1/JFSK_20251230_115914_N1_00/JFSK_20251230_115914_N1_00.mp4"
+#     OUTPUT_FOLDER = "E:/data/datasetsV1.1/JFSK_20251230_115914_N1_00/images/train"
+#
+#     extract_frames(VIDEO_FILE, OUTPUT_FOLDER)
 if __name__ == "__main__":
-    VIDEO_FILE = "night.mp4"
-    OUTPUT_FOLDER = "images/train"
+    # 定义基础路径和视频名称
+    BASE_PATH = "E:/pycharmProjects/Sany-Excavator-Count/train/datasets/datasetV1.2/"
+    VIDEO_NAMES = [
+        "JFSK_20251230_121914_N1_00",
+        "JFSK_20251230_154914_N1_00",
+        "JFSK_20251230_155914_N1_00"
+    ]
 
-    extract_frames(VIDEO_FILE, OUTPUT_FOLDER)
+    # 自动生成路径
+    for video_name in VIDEO_NAMES:
+        video_file = f"{BASE_PATH}{video_name}/{video_name}.mp4"
+        output_folder = f"{BASE_PATH}{video_name}/images/train"
+
+        print(f"\n处理视频: {video_file}")
+        print(f"输出到: {output_folder}")
+        extract_frames(video_file, output_folder)

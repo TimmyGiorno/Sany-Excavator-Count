@@ -1,6 +1,10 @@
 import sys
 import io
 
+import numpy as np
+import torch
+from PIL import Image
+
 # 强制将标准输出和错误输出设置为 utf-8
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
@@ -8,9 +12,19 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 import cv2
 from ultralytics import YOLO
 
+# ========== 强制实时输出 ==========
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+import functools
+
+print = functools.partial(print, flush=True)
+
+
+# =================================
+
 
 class VideoTracker:
-    def __init__(self, video_path, model_path, output_path, tracker_config="bytetrack.yaml"):
+    def __init__(self, video_path, model_path, output_path, siamese_model_path, tracker_config="bytetrack.yaml"):
         """
         初始化视频跟踪器
 
@@ -24,18 +38,28 @@ class VideoTracker:
         self.model_path = model_path
         self.output_path = output_path
         self.tracker_config = tracker_config
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
         # 计数器和状态标志
         self.total_truck_count = 0
         self.total_bucket_count = 0
-        self.truck_full = False
         self.bucket_full = False
-        self.truck_state_change_count = 0
-        self.state_change_threshold = 25
+        self.dumping_active = False
+
+        # 记录上一斗的矿车画面
+        self.last_truck_img = None
+        self.previous_truck_img = None
+        self._last_dumping_box = None
 
         # 加载模型
         print(f">>> 正在加载模型: {self.model_path}")
         self.model = YOLO(self.model_path)
+
+        # 加载孪生网络模型（用于车辆重识别）
+        print(f">>> 正在加载孪生网络模型...")
+        self.siamese_model = None
+        self.siamese_transform = None
+        self.init_siamese_model(siamese_model_path)
 
         # 视频相关属性（在 run_video_inference 中初始化）
         self.cap = None
@@ -44,6 +68,38 @@ class VideoTracker:
         self.height = None
         self.fps = None
         self.total_frames = None
+
+    def init_siamese_model(self, siamese_model_path):
+        """
+        初始化孪生网络模型
+
+        Args:
+            siamese_model_path: 训练好的孪生模型权重路径
+        """
+        # 导入必要的模块
+        from pathlib import Path
+        import sys
+
+        # 添加模型路径（根据你的实际目录调整）
+        model_path = Path(siamese_model_path).parent
+        if str(model_path) not in sys.path:
+            sys.path.insert(0, str(model_path))
+
+        # 导入孪生网络模型
+        try:
+            from siamese_model.siamese_network import load_siamese_model
+            from utils.transforms import get_transforms
+
+            self.siamese_model, _ = load_siamese_model(siamese_model_path, self.device)
+            self.siamese_model.eval()
+            self.siamese_transform = get_transforms(224, is_train=False)  # 224是输入尺寸
+
+            print(f">>> 孪生网络模型加载成功，设备: {self.device}")
+
+        except ImportError as e:
+            print(f"⚠️ 无法加载孪生网络模块: {e}")
+            print("将跳过车辆重识别功能")
+            self.siamese_model = None
 
     def get_counts(self):
         """
@@ -60,12 +116,92 @@ class VideoTracker:
         """
         self.total_truck_count = 0
         self.total_bucket_count = 0
-        self.truck_full = False
         self.bucket_full = False
-        self.truck_state_change_count = 0
         print(">>> 计数器已重置")
 
-    def _update_state_machine(self, yolo_results):
+    @staticmethod
+    def _letterbox(image, target_size=(224, 224)):
+        """
+        使用letterbox方法将图片对齐到目标尺寸，保持宽高比
+
+        Args:
+            image: 输入图片 (numpy array)
+            target_size: 目标尺寸 (height, width)
+
+        Returns:
+            letterboxed_image: 对齐后的图片
+        """
+        if isinstance(target_size, tuple):
+            target_h, target_w = target_size
+        else:
+            target_h = target_w = target_size
+
+        h, w = image.shape[:2]
+        scale = min(target_w / w, target_h / h)
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+
+        # 缩放
+        resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+        # 计算填充
+        dw = target_w - new_w
+        dh = target_h - new_h
+        pad_left = dw // 2
+        pad_right = dw - pad_left
+        pad_top = dh // 2
+        pad_bottom = dh - pad_top
+
+        # 填充
+        letterboxed = cv2.copyMakeBorder(
+            resized, pad_top, pad_bottom, pad_left, pad_right,
+            cv2.BORDER_CONSTANT, value=(114, 114, 114)
+        )
+
+        return letterboxed
+
+    @staticmethod
+    def _expand_bbox_for_truck(bbox, frame_shape):
+        """
+        根据卡车框的形状进行扩展：
+        - 如果宽度 > 高度：向上延长高度（纳入上方矿物）
+        - 如果高度 > 宽度：向左右平均延长
+        - 保持底边/中心不变（根据需求调整）
+
+        Args:
+            bbox: [x1, y1, x2, y2] (y1是上边界，y2是下边界)
+            frame_shape: (height, width)
+
+        Returns:
+            expanded_bbox: [x1, y1, x2, y2]
+        """
+        h, w = frame_shape[:2]
+        x1, y1, x2, y2 = bbox
+
+        width = x2 - x1
+        height = y2 - y1
+
+        if width > height:
+            # 宽度大于高度：向上延长高度，保持底边不变
+            new_height = width  # 目标高度 = 当前宽度
+            new_y1 = max(0, y2 - new_height)  # 向上延长，保持y2不变
+            new_y2 = y2
+            new_x1 = x1
+            new_x2 = x2
+        else:
+            # 高度大于宽度：向左右平均延长
+            new_width = height  # 目标宽度 = 当前高度
+            total_dx = new_width - width
+            left_dx = total_dx // 2
+            right_dx = total_dx - left_dx
+            new_x1 = max(0, x1 - left_dx)
+            new_x2 = min(w, x2 + right_dx)
+            new_y1 = y1
+            new_y2 = y2
+
+        return [int(new_x1), int(new_y1), int(new_x2), int(new_y2)]
+
+    def _update_state_machine(self, yolo_results, frame):
         """
         处理 YOLO 当前帧的输出，更新状态机逻辑。
 
@@ -78,28 +214,29 @@ class VideoTracker:
 
         """
         if yolo_results.boxes is None:
-            return self.total_truck_count, self.total_bucket_count
+            return
 
         # 获取所有检测结果
         boxes = yolo_results.boxes
         class_ids = boxes.cls.int().tolist()
         track_ids = boxes.id.int().tolist() if boxes.id is not None else [None] * len(class_ids)
-        xyxy_list = boxes.xyxy.tolist()  # 获取所有边界框坐标 [x1, y1, x2, y2]
+        xyxy_list = boxes.xyxy.tolist()
         conf_list = boxes.conf.tolist()
 
         # 准备数据容器
-        truck_boxes = []  # 存储所有 truck 的边界框
-        bucket_boxes = []  # 存储所有 bucket 的边界框
+        truck_boxes = []  # 存储所有 truck (class_id=2)
+        bucket_boxes = []  # 存储所有 bucket (class_id=0,1)
+        dumping_boxes = []  # 存储所有 dumping (class_id=4)
 
         # 分类存储检测结果
         for i, (class_id, track_id, xyxy, conf) in enumerate(zip(class_ids, track_ids, xyxy_list, conf_list)):
-            if class_id in [2, 3]:  # truck-empty 或 truck-full
+            if class_id == 2:  # truck
                 truck_boxes.append({
                     'class_id': class_id,
                     'track_id': track_id,
                     'xyxy': xyxy,
                     'conf': conf,
-                    'class_name': 'truck-full' if class_id == 3 else 'truck-empty'
+                    'class_name': 'truck'
                 })
             elif class_id in [0, 1]:  # bucket-empty 或 bucket-full
                 bucket_boxes.append({
@@ -108,6 +245,14 @@ class VideoTracker:
                     'xyxy': xyxy,
                     'conf': conf,
                     'class_name': 'bucket-full' if class_id == 1 else 'bucket-empty'
+                })
+            elif class_id == 4:  # dumping
+                dumping_boxes.append({
+                    'class_id': class_id,
+                    'track_id': track_id,
+                    'xyxy': xyxy,
+                    'conf': conf,
+                    'class_name': 'dumping'
                 })
 
         # ============================================================
@@ -154,29 +299,113 @@ class VideoTracker:
         # 2. 处理 truck 状态转换（需要连续多帧确认）
         # ============================================================
 
-        # TODO:对于一帧内有多辆卡车的情况进行处理
+        has_dumping = len(dumping_boxes) > 0
 
-        for truck in truck_boxes:
-            class_id = truck['class_id']
+        if has_dumping and not self.bucket_full:
+            return
 
-            if class_id == 3:  # truck-full
-                if not self.truck_full:
-                    self.truck_state_change_count += 1
-                    if self.truck_state_change_count >= self.state_change_threshold:
-                        self.truck_state_change_count = 0
-                        self.truck_full = True
-                else:
-                    self.truck_state_change_count = 0
+        if has_dumping and not self.dumping_active:
+            self.dumping_active = True
 
-            elif class_id == 2:  # truck-empty
-                if self.truck_full:
-                    self.truck_state_change_count += 1
-                    if self.truck_state_change_count >= self.state_change_threshold:
-                        self.truck_state_change_count = 0
-                        self.truck_full = False
-                        self.total_truck_count += 1
-                else:
-                    self.truck_state_change_count = 0
+        # 记录最后一帧的dumping位置（有dumping时更新）
+        if has_dumping:
+            self._last_dumping_box = dumping_boxes[0]['xyxy']
+
+        if not has_dumping and self.dumping_active and not self.bucket_full:
+
+            if self._last_dumping_box is not None and truck_boxes:
+                dumping_center_x = (self._last_dumping_box[0] + self._last_dumping_box[2]) / 2
+
+                closest_truck = None
+                min_distance = float('inf')
+
+                for truck in truck_boxes:
+                    if self._check_horizontal_overlap(self._last_dumping_box, truck['xyxy']):
+                        truck_center_x = (truck['xyxy'][0] + truck['xyxy'][2]) / 2
+                        distance = abs(truck_center_x - dumping_center_x)
+
+                        if distance < min_distance:
+                            min_distance = distance
+                            closest_truck = truck
+
+                if closest_truck:
+                    # 扩展边界框并提取truck图片
+                    expanded_bbox = self._expand_bbox_for_truck(closest_truck['xyxy'], frame.shape)
+                    x1, y1, x2, y2 = expanded_bbox
+                    truck_img = frame[y1:y2, x1:x2]
+                    if truck_img.size > 0:
+                        current_truck_img = self._letterbox(truck_img, (224, 224))
+
+                        # 如果有上一次的truck图片，用孪生网络判断
+                        if self.last_truck_img is not None:
+                            result = self._compare_trucks(self.last_truck_img, current_truck_img)
+
+                            if result.get('is_same') is False:
+                                self.total_truck_count += 1
+                                print(f"  [计数] 不同车辆，卡车计数 +1，当前总数: {self.total_truck_count}")
+                            else:
+                                print(f"  [计数] 同一辆车，不计数")
+
+                        # 更新上一次的truck图片
+                        self.previous_truck_img = self.last_truck_img
+                        self.last_truck_img = current_truck_img
+
+            self.dumping_active = False
+
+    def _compare_trucks(self, img1, img2, threshold=0.75):
+        """
+        使用孪生网络比较两张truck图片是否为同一辆车
+
+        Args:
+            img1: numpy array格式的第一张图片
+            img2: numpy array格式的第二张图片
+            threshold: 判断阈值
+
+        Returns:
+            dict: {'is_same': bool, 'similarity': float}
+        """
+        if self.siamese_model is None:
+            # 没有孪生模型时，默认判断为同一辆车（不计数）
+            return {'is_same': True, 'similarity': 1.0}
+
+        # 转换numpy为tensor
+        img1_tensor = self._numpy_to_tensor(img1)
+        img2_tensor = self._numpy_to_tensor(img2)
+
+        # 推理
+        with torch.no_grad():
+            similarity = self.siamese_model.compare(img1_tensor, img2_tensor)
+            similarity = similarity.item()
+
+        is_same = similarity > threshold
+
+        return {'is_same': is_same, 'similarity': similarity}
+
+    def _numpy_to_tensor(self, img):
+        """
+        将numpy格式的图片转换为模型输入tensor
+
+        Args:
+            img: numpy array, shape (H, W, C), BGR顺序
+
+        Returns:
+            tensor: shape (1, 3, 224, 224), RGB顺序, 归一化
+        """
+        from PIL import Image
+
+        # BGR转RGB
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        # 将numpy array转换为PIL Image
+        img_pil = Image.fromarray(img_rgb)
+
+        # 应用transform
+        tensor = self.siamese_transform(img_pil)
+
+        # 添加batch维度
+        tensor = tensor.unsqueeze(0).to(self.device)
+
+        return tensor
 
     @staticmethod
     def _check_horizontal_overlap(box1, box2):
@@ -214,9 +443,14 @@ class VideoTracker:
         self.fps = int(self.cap.get(cv2.CAP_PROP_FPS))
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        # 初始化视频写入器 (mp4v 编码兼容性较好)
+        # 计算新画布尺寸
+        display_width = self.height // 2  # 显示区域宽度 = 视频高度的一半（保持正方形）
+        new_width = self.width + display_width + 20  # 原宽度 + 显示区宽度 + 边距
+        new_height = self.height
+
+        # 创建视频写入器（使用新尺寸）
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        self.out = cv2.VideoWriter(self.output_path, fourcc, self.fps, (self.width, self.height))
+        self.out = cv2.VideoWriter(self.output_path, fourcc, self.fps, (new_width, new_height))
 
         frame_count = 0
 
@@ -238,7 +472,7 @@ class VideoTracker:
             # ---------------------------------------------------------
             # B. 调用状态机 (目前返回当前累计值)
             # ---------------------------------------------------------
-            self._update_state_machine(results[0])
+            self._update_state_machine(results[0], frame)
             trucks, buckets = self.get_counts()
 
             # ---------------------------------------------------------
@@ -260,8 +494,41 @@ class VideoTracker:
             cv2.putText(annotated_frame, f"Buckets: {buckets}", (self.width - 330, 105), font, 1.2, (0, 255, 0), 2,
                         cv2.LINE_AA)
 
-            # 写入文件
-            self.out.write(annotated_frame)
+            # 在渲染部分，创建画布
+            output_canvas = np.zeros((new_height, new_width, 3), dtype=np.uint8)
+
+            # 原视频放在左侧
+            output_canvas[0:self.height, 0:self.width] = annotated_frame
+
+            # 右侧显示区域
+            right_x = self.width + 10
+            display_block_height = self.height // 2 - 10  # 每个方块高度（留边距）
+            display_block_width = display_block_height  # 正方形
+
+            # 显示 previous_truck_img（上半部分）
+            if self.previous_truck_img is not None:
+                display_img = cv2.resize(self.previous_truck_img, (display_block_width, display_block_height))
+                output_canvas[10:10 + display_block_height, right_x:right_x + display_block_width] = display_img
+                cv2.putText(output_canvas, "Previous", (right_x, 30), font, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+            else:
+                cv2.rectangle(output_canvas, (right_x, 10), (right_x + display_block_width, 10 + display_block_height),
+                              (50, 50, 50), -1)
+
+            # 显示 last_truck_img（下半部分）
+            if self.last_truck_img is not None:
+                display_img = cv2.resize(self.last_truck_img, (display_block_width, display_block_height))
+                y_offset = 10 + display_block_height + 10
+                output_canvas[y_offset:y_offset + display_block_height,
+                right_x:right_x + display_block_width] = display_img
+                cv2.putText(output_canvas, "Current", (right_x, y_offset - 5), font, 0.6, (255, 255, 255), 1,
+                            cv2.LINE_AA)
+            else:
+                y_offset = 10 + display_block_height + 10
+                cv2.rectangle(output_canvas, (right_x, y_offset),
+                              (right_x + display_block_width, y_offset + display_block_height), (50, 50, 50), -1)
+
+            # 写入画布
+            self.out.write(output_canvas)
 
             # 打印进度提示
             if frame_count % 50 == 0:
@@ -274,15 +541,18 @@ class VideoTracker:
 
 
 if __name__ == "__main__":
-    TEST_VIDEO = "./JFSK_20251230_165914_N1_00.mp4"  # 输入的测试视频
+    # TEST_VIDEO = "./JFSK_20251230_165914_N1_00.mp4"  # 输入的测试视频
+    TEST_VIDEO = "E:/data/mp4/JFSK_20251230_140914_N1_00.mp4"
     TRAINED_MODEL = "./best.pt"  # 训练出的最佳权重
-    OUTPUT_VIDEO = "output_inference.mp4"  # 输出的视频名
+    OUTPUT_VIDEO = "test3.mp4"  # 输出的视频名
+    SIAMESE_MODEL_PATH = "./runs/siamese_model/attention_siamese_best.pth"
 
     # 创建跟踪器实例
     tracker = VideoTracker(
         video_path=TEST_VIDEO,
         model_path=TRAINED_MODEL,
         output_path=OUTPUT_VIDEO,
+        siamese_model_path=SIAMESE_MODEL_PATH,
         tracker_config="bytetrack.yaml"
     )
 

@@ -1,26 +1,26 @@
-"""
-示例目录标记：
-train:
-- day/images/train
-- night/images/train
-val:
-- day/images/val
-- night/images/val
-"""
-
-# 这里的路径是相对于执行训练脚本的位置
-path: ./datasets
+# 这里的路径是相对于你执行训练脚本的位置
+path: ./datasets 
 
 train:
-  - images/train
+  - datasetV1.2/JFSK_20251230_113914_N1_00/images/train
+  - datasetV1.2/JFSK_20251230_115914_N1_00/images/train
+  - datasetV1.2/JFSK_20251230_120914_N1_00/images/train
+  - datasetV1.2/JFSK_20251230_121914_N1_00/images/train
+  - datasetV1.2/JFSK_20251230_154914_N1_00/images/train
+  - datasetV1.2/JFSK_20251230_155914_N1_00/images/train
+  - datasetV1.2/JFSK_20251230_170914_N1_00/images/train
+  - datasetV1.2/JFSK_20251230_172915_N1_00/images/train
+  - datasetV1.2/JFSK_20251231_004916_N1_00/images/train
 
 val:
-  - images/val
+  - datasetV1.2/JFSK_20251230_110914_N1_00/images/train
+  - datasetV1.2/JFSK_20251230_165914_N1_00/images/train
 
-# 四类标签
-nc: 4
+# 类别保持一致
+nc: 5
 names:
   0: bucket-empty
   1: bucket-full
-  2: truck-empty
-  3: truck-full
+  2: truck
+  3: loading
+  4: dumping
