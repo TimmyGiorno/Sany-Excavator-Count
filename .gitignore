@@ -212,3 +212,8 @@ _files/
 /rknn_sim_deploy/tmp_files/
 
 /deploy_cpp/3rdparty
+/infer/dumping_truck_extracts/
+
+/rknn2_sim_deploy/tmp_files/
+/rknn2_sim_deploy/raw_imgs/
+/rknn2_sim_deploy/calibration_imgs/
