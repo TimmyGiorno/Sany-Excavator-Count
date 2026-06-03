@@ -9,7 +9,7 @@ MODEL_CONFIG = {
     # YOLO 检测模型参数
     'YOLO_ONNX_PATH': './tmp_files/best.onnx',
     'YOLO_OUTPUT_RKNN': './tmp_files/best.rknn',
-    'YOLO_DATASET_PATH': './dataset.txt',
+    'YOLO_DATASET_PATH': './yolo_dataset.txt',
     'INPUT_SIZE': (640, 640),
     'CLASSES': ['bucket-empty', 'bucket-full', 'truck', 'loading', 'dumping'],
     'REG_MAX': 16,
@@ -17,7 +17,7 @@ MODEL_CONFIG = {
     # 孪生网络重识别模型参数
     'SIAMESE_ONNX_PATH': './tmp_files/siamese_extractor.onnx',
     'SIAMESE_OUTPUT_RKNN': './tmp_files/siamese_extractor.rknn',
-    'SIAMESE_DATASET_PATH': './dataset_trucks.txt',
+    'SIAMESE_DATASET_PATH': './siamese_dataset.txt',
     'SIAMESE_INPUT_SIZE': (224, 224),
     'SIAMESE_THRESH': 0.75,  # 判定为同一辆车的重识别置信度阈值
 
@@ -172,7 +172,9 @@ def run_inference():
                          quant_img_RGB2BGR=True)
         if rknn_yolo.load_onnx(model=MODEL_CONFIG['YOLO_ONNX_PATH']) != 0:
             raise RuntimeError("加载 YOLO ONNX 失败")
-        rknn_yolo.build(do_quantization=False)  # 依据你的代码，目前采用非量化构建
+        ret = rknn_yolo.build(do_quantization=True, dataset=MODEL_CONFIG['YOLO_DATASET_PATH'])
+        if ret != 0:
+            raise RuntimeError("YOLO 模型量化失败")
         rknn_yolo.export_rknn(MODEL_CONFIG['YOLO_OUTPUT_RKNN'])
         if rknn_yolo.init_runtime() != 0:
             raise RuntimeError("启动 YOLO 硬件环境失败")
@@ -181,11 +183,12 @@ def run_inference():
         print("--> 正在编译量化组件（Siamese 车辆重识别引擎）...")
         rknn_siamese.config(mean_values=[[123.675, 116.28, 103.53]], std_values=[[58.395, 57.12, 57.375]],
                             target_platform='rk3568', quant_img_RGB2BGR=True)
-        # 固定输入尺寸以解决动态 Batch 问题
         if rknn_siamese.load_onnx(model=MODEL_CONFIG['SIAMESE_ONNX_PATH'], inputs=['input_image'],
                                   input_size_list=[[1, 3, 224, 224]]) != 0:
             raise RuntimeError("加载 Siamese ONNX 失败")
-        rknn_siamese.build(do_quantization=False)
+        ret = rknn_siamese.build(do_quantization=True, dataset=MODEL_CONFIG['SIAMESE_DATASET_PATH'])
+        if ret != 0:
+            raise RuntimeError("Siamese 模型量化失败")
         rknn_siamese.export_rknn(MODEL_CONFIG['SIAMESE_OUTPUT_RKNN'])
         if rknn_siamese.init_runtime() != 0:
             raise RuntimeError("启动 Siamese 硬件环境失败")
@@ -334,7 +337,7 @@ def run_inference():
                     # 状态复位
                     state['dumping_active'] = False
 
-            # === 第三阶段：最终可视化渲染 (已修复缩进，无条件每帧执行) ===
+            # === 第三阶段：最终可视化渲染 ===
 
             # 1. 渲染 YOLO 目标检测框
             for res in results:
