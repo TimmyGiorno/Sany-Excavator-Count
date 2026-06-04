@@ -29,7 +29,6 @@ echo.
 echo =======================================================
 echo [2/3] 正在通过 ADB 同步文件到设备 (使用增量同步)...
 echo =======================================================
-:: 移除了所有不需要的 call 前缀，防止变量被底层错误展开
 adb push --sync test_excavator /data/local/tmp/
 adb shell chmod +x /data/local/tmp/test_excavator
 
@@ -38,7 +37,7 @@ adb push --sync ./3rdparty/opencv/opencv-4.13.0-android-sdk/OpenCV-android-sdk/s
 adb push --sync ./3rdparty/rknn/android/arm64-v8a/librknnrt.so /data/local/tmp/
 adb push --sync ./tmp_files/best.rknn /data/local/tmp/
 adb push --sync ./tmp_files/siamese_extractor.rknn /data/local/tmp/
-adb push --sync ./tmp_files/test_video.mp4 /data/local/tmp/
+adb push --sync ./tmp_files/test_video_shift_fast.mp4 /data/local/tmp/
 
 echo.
 echo =======================================================
@@ -48,7 +47,7 @@ echo =======================================================
 adb shell "mkdir -p /data/local/tmp/out_frames && rm -f /data/local/tmp/out_frames/*.jpg"
 
 :: 执行推理。没有 call 的干扰，%%04d 将被正确转义为 %04d 并传给 OpenCV
-adb shell "export LD_LIBRARY_PATH=/data/local/tmp:$LD_LIBRARY_PATH && /data/local/tmp/test_excavator /data/local/tmp/best.rknn /data/local/tmp/siamese_extractor.rknn /data/local/tmp/test_video_fast.mp4 /data/local/tmp/out_frames/frame_%%04d.jpg"
+adb shell "export LD_LIBRARY_PATH=/data/local/tmp:$LD_LIBRARY_PATH && /data/local/tmp/test_excavator /data/local/tmp/best.rknn /data/local/tmp/siamese_extractor.rknn /data/local/tmp/test_video_shift_fast.mp4 /data/local/tmp/out_frames/frame_%%04d.jpg"
 
 echo.
 echo =======================================================

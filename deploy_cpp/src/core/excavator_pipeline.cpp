@@ -345,13 +345,11 @@ public:
                             float sim = cosine_similarity(state.last_truck_emb, current_emb);
                             if (sim < SIAMESE_THRESH) {
                                 state.total_truck_count++;
-                                state.is_new_truck_entered = true; // 换车事件
-                                state.total_bucket_count = 0;      // 换车后铲数清零
+                                state.is_new_truck_entered = true; // 触发换车事件给 Java
                             }
                         } else {
                             state.total_truck_count++;
                             state.is_new_truck_entered = true; // 第一辆车进入
-                            state.total_bucket_count = 0;
                         }
 
                         state.previous_truck_img = state.last_truck_img.clone();

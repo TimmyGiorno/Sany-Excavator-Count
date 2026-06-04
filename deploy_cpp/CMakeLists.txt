@@ -23,16 +23,20 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Android")
     # ================== Android 编译分支 ==================
     message(STATUS "编译目标: Android JNI")
 
-    # 添加 JNI 特有的库
+    # 👇 [新增] 告诉 CMake 你的第三方 .so 库在哪个文件夹里
+    link_directories(${CMAKE_SOURCE_DIR}/3rdparty/rknn/android/arm64-v8a)
+    link_directories(${CMAKE_SOURCE_DIR}/3rdparty/opencv/opencv-4.13.0-android-sdk/OpenCV-android-sdk/sdk/native/libs/arm64-v8a)
+
+    # 添加 JNI 特有的系统库 (日志和图形缓冲)
     find_library(log-lib log)
     find_library(jnigraphics-lib jnigraphics)
+    find_library(android-lib android)
 
     # 编译成名为 libexcavator_jni.so 的安卓库，包含 jni 接口和核心算法
     add_library(excavator_jni SHARED ${CORE_SRC} src/jni/excavator_jni.cpp)
 
-    # 链接安卓特有的库 (OpenCV 和 RKNN 的链接路径由 NDK 决定)
-    target_link_libraries(excavator_jni ${log-lib} ${jnigraphics-lib} rknn_api opencv_java4)
-
+    # 👇 [修改] 链接库名称。RKNN 的库名通常是 rknnrt (对应 librknnrt.so)
+    target_link_libraries(excavator_jni ${log-lib} ${jnigraphics-lib} ${android-lib} rknnrt opencv_java4)
 else()
     # ================== Linux 编译分支 ==================
     message(STATUS "编译目标: Linux Native")

@@ -5,9 +5,9 @@ from typing import Dict, Any
 
 # ================= 配置区 =================
 VIDEO_CONFIG = {
-    'INPUT_VIDEO': './tmp_files/test_video.mp4',  # 原始视频路径
-    'OUTPUT_VIDEO': './tmp_files/test_video_fast.mp4',  # 加速后的视频保存路径
-    'SPEED_FACTOR': 4.0,  # 加速倍数（例如：4.0 表示 4 倍速）
+    'INPUT_VIDEO': './tmp_files/test_video_shift.mp4',  # 原始视频路径
+    'OUTPUT_VIDEO': './tmp_files/test_video_shift_fast.mp4',  # 加速后的视频保存路径
+    'SPEED_FACTOR': 5.0,  # 加速倍数（例如：4.0 表示 4 倍速）
 }
 
 
