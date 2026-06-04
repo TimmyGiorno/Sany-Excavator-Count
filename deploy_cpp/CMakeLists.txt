@@ -1,70 +1,37 @@
-cmake_minimum_required(VERSION 3.10)
-project(SanyExcavatorCountingAlg LANGUAGES CXX)
-
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-# Determine whether Visual Studio Compiler
 if(MSVC)
     add_compile_options(/utf-8)
 endif()
 
-# Select one Backend
-option(USE_RKNN  "Rockchip NPU backend (Android / Linux ARM)"  OFF)
-option(USE_ONNX  "ONNX Runtime backend (Windows / Linux x86)"  OFF)
-option(USE_MOCK  "Mock backend for pipeline benchmarking"      ON )
+cmake_minimum_required(VERSION 3.10)
+project(ExcavatorMultiPlatform)
 
-if(USE_RKNN)
-    add_definitions(-DUSE_RKNN)
-    set(BACKEND_SRC src/backends/rknn_backend.cpp)
-    set(BACKEND_INCLUDE jni)
-    message(STATUS "Backend: RKNN")
-elseif(USE_ONNX)
-    add_definitions(-DUSE_ONNX)
-    set(BACKEND_SRC src/backends/onnx_backend.cpp)
-    message(STATUS "Backend: ONNX Runtime")
+# 包含核心算法代码
+set(CORE_SRC src/core/excavator_pipeline.cpp)
+include_directories(src/core)
+include_directories(3rdparty/rknn/include)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+    # ================== Android 编译分支 ==================
+    message(STATUS "编译目标: Android JNI")
+
+    # 添加 JNI 特有的库
+    find_library(log-lib log)
+    find_library(jnigraphics-lib jnigraphics)
+
+    # 编译成名为 libexcavator_jni.so 的安卓库，包含 jni 接口和核心算法
+    add_library(excavator_jni SHARED ${CORE_SRC} src/jni/excavator_jni.cpp)
+
+    # 链接安卓特有的库 (OpenCV 和 RKNN 的链接路径由 NDK 决定)
+    target_link_libraries(excavator_jni ${log-lib} ${jnigraphics-lib} rknn_api opencv_java4)
+
 else()
-    add_definitions(-DUSE_MOCK)
-    set(BACKEND_SRC src/backends/mock_backend.cpp)
-    message(STATUS "Backend: Mock (benchmarking)")
+    # ================== Linux 编译分支 ==================
+    message(STATUS "编译目标: Linux Native")
+
+    # 编译成标准的 Linux 动态库
+    add_library(excavator_algo SHARED ${CORE_SRC})
+
+    # 编译测试用的可执行程序
+    add_executable(test_linux src/linux/main.cpp)
+    target_link_libraries(test_linux excavator_algo rknn_api opencv_core opencv_videoio)
 endif()
-
-# Sources
-set(COMMON_SRC
-    src/inference_engine.cpp
-    src/excavator_tracker.cpp
-)
-
-set(ENGINE_SRC
-    ${COMMON_SRC}
-    ${BACKEND_SRC}
-)
-
-include_directories(
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/${BACKEND_INCLUDE}
-)
-
-
-# Target: excavator_algo  (shared library, Android via CMake)
-add_library(excavator_algo SHARED
-        ${ENGINE_SRC}
-        jni/excavator_jni.cpp)
-target_compile_options(excavator_algo PRIVATE -Wall -O2 -fPIC -fexceptions -frtti)
-target_link_libraries(excavator_algo rknnrt log android)
-
-
-# Target: test_video  (Windows desktop performance test)
-#    set(THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty")
-#
-#    add_executable(test_video
-#        src/main.cpp
-#        ${ENGINE_SRC}
-#    )
-#
-#    set(OpenCV_DIR "${THIRD_PARTY_DIR}/opencv/windows_x64/build/x64/vc16/lib")
-#    find_package(OpenCV 4 REQUIRED)
-#    set(ORT_DIR "${THIRD_PARTY_DIR}/onnxruntime/windows_x64")
-#    include_directories(${ORT_DIR}/include)
-#    set(ONNXRUNTIME_LIB "${ORT_DIR}/lib/onnxruntime.lib")
-#    target_link_libraries(test_video ${OpenCV_LIBS} ${ONNXRUNTIME_LIB})

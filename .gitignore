@@ -212,9 +212,10 @@ _files/
 
 /deploy_cpp/3rdparty
 
-/rknn2_sim_deploy/tmp_files/
-/rknn2_sim_deploy/raw_imgs/
-/rknn2_sim_deploy/calibration_imgs/
-
 /infer/tmp_files/
 /infer/dumping_truck_extracts/
+
+/rknn2_sim_deploy/tmp_files/
+/rknn2_sim_deploy/yolo_raw_imgs/
+/rknn2_sim_deploy/yolo_calibration_imgs/
+/rknn2_sim_deploy/siamese_calibration_imgs/
