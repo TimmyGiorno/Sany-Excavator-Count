@@ -9,6 +9,15 @@ project(ExcavatorMultiPlatform)
 set(CORE_SRC src/core/excavator_pipeline.cpp)
 include_directories(src/core)
 include_directories(3rdparty/rknn/include)
+include_directories(3rdparty/opencv/opencv-4.13.0-android-sdk/OpenCV-android-sdk/sdk/native/jni/include)
+
+set(NDK_SYSROOT "C:/Users/GT15/AppData/Local/Android/Sdk/ndk/30.0.14904198/toolchains/llvm/prebuilt/windows-x86_64/sysroot")
+
+# 引入基础的 jni.h 等标准库头文件
+include_directories(${NDK_SYSROOT}/usr/include)
+
+# 引入 Android 特定的头文件 (如 android/asset_manager.h, android/log.h)
+include_directories(${NDK_SYSROOT}/usr/include/aarch64-linux-android)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Android")
     # ================== Android 编译分支 ==================
