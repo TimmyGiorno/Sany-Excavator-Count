@@ -30,6 +30,9 @@ extern "C" {
     // 4. 释放资源
     EXCAVATOR_API void release_pipeline(void* handle);
 
+    // 5. 动态调参接口
+    EXCAVATOR_API void update_pipeline_config(void* handle, float conf_thresh, float iou_thresh, float siamese_thresh);
+
 #ifdef __cplusplus
 }
 #endif

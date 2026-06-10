@@ -17,7 +17,7 @@ call %CXX% src\linux\main.cpp src\core\excavator_pipeline.cpp ^
     -I./3rdparty/opencv/opencv-4.13.0-android-sdk/OpenCV-android-sdk/sdk/native/jni/include ^
     -L./3rdparty/rknn/android/arm64-v8a -lrknnrt ^
     -L./3rdparty/opencv/opencv-4.13.0-android-sdk/OpenCV-android-sdk/sdk/native/libs/arm64-v8a -lopencv_java4 ^
-    -lc++_shared -lm -O3 -o test_excavator
+    -lc++_shared -lm -O3 -o ./tmp_files/test_excavator
 
 if %ERRORLEVEL% NEQ 0 (
     echo ❌ 编译失败！请检查上方报错信息。
@@ -29,7 +29,7 @@ echo.
 echo =======================================================
 echo [2/3] 正在通过 ADB 同步文件到设备 (使用增量同步)...
 echo =======================================================
-adb push --sync test_excavator /data/local/tmp/
+adb push --sync ./tmp_files/test_excavator /data/local/tmp/
 adb shell chmod +x /data/local/tmp/test_excavator
 
 adb push --sync %NDK_PATH%\toolchains\llvm\prebuilt\windows-x86_64\sysroot\usr\lib\aarch64-linux-android\libc++_shared.so /data/local/tmp/
@@ -54,7 +54,7 @@ echo =======================================================
 echo 正在从开发板拉取渲染图片...
 echo =======================================================
 :: 规避了容易导致乱码中断的词汇，确保顺利打包拉回
-adb pull /data/local/tmp/out_frames/ ./
+adb pull /data/local/tmp/out_frames/ ./tmp_files/
 
 echo.
 echo ✅ 全部流程处理完毕！请在当前工程目录下的 out_frames 文件夹中查看结果。

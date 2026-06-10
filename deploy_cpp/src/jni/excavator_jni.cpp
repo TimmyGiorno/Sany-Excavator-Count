@@ -14,14 +14,14 @@
 
 // ================= 内存映射结构体 =================
 struct PipelineState {
+    std::string ticket_id;             // 新增：票号
     int total_truck_count;
-    int total_bucket_count;
+    int total_bucket_count;            // 绝对总斗数
     bool bucket_full;
     bool dumping_active;
     cv::Rect last_dumping_box;
-    cv::Mat last_truck_img;
-    cv::Mat previous_truck_img;
-    std::vector<float> last_truck_emb;
+    cv::Mat reference_truck_img;       // 替换旧变量
+    std::vector<float> reference_truck_emb; // 替换旧变量
 
     cv::Rect current_bucket_box;
     int current_bucket_type;
@@ -157,66 +157,72 @@ JNIEXPORT void JNICALL
 Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_detectNative(JNIEnv *env, jclass clazz, jlong handlePtr, jbyteArray yuvData, jint width, jint height, jobject callback) {
     if (handlePtr == 0 || !yuvData || !callback) return;
 
-    // 1. 将 Java 的 NV21 YUV 转换为 OpenCV BGR 格式
     jbyte* yuv_buf = env->GetByteArrayElements(yuvData, NULL);
     cv::Mat yuv(height + height / 2, width, CV_8UC1, (unsigned char*)yuv_buf);
     cv::Mat bgr;
     cv::cvtColor(yuv, bgr, cv::COLOR_YUV2BGR_NV21);
-    env->ReleaseByteArrayElements(yuvData, yuv_buf, JNI_ABORT); // 极速释放 Android 内存锁
+    env->ReleaseByteArrayElements(yuvData, yuv_buf, JNI_ABORT);
 
-    // 2. 调用核心算法层推理
     void* handle = reinterpret_cast<void*>(handlePtr);
     process_frame(handle, bgr.data, bgr.cols, bgr.rows, 3);
 
-    // 3. 拿到算出来的状态机数据
     PipelineState* state = (PipelineState*)get_pipeline_state(handle);
     if (!state) return;
 
-    // 4. JNI 反射：创建 Java 的 ExcavatorResult 对象
     jclass resultClass = env->FindClass("com/rosenshine/hhd/Excavator/ExcavatorResult");
     jmethodID constructor = env->GetMethodID(resultClass, "<init>", "()V");
     jobject resultObj = env->NewObject(resultClass, constructor);
 
-    // ============= 填充业务字段 =============
-    env->SetIntField(resultObj, env->GetFieldID(resultClass, "currentShovelCount", "I"), state->total_bucket_count);
+    // ============= 填充基础业务字段 =============
+    env->SetIntField(resultObj, env->GetFieldID(resultClass, "currentShovelCount", "I"), state->total_bucket_count); // 传绝对斗数，Java去减
     env->SetBooleanField(resultObj, env->GetFieldID(resultClass, "isLoading", "Z"), state->dumping_active);
     env->SetBooleanField(resultObj, env->GetFieldID(resultClass, "isComplete", "Z"), state->is_new_truck_entered);
     env->SetBooleanField(resultObj, env->GetFieldID(resultClass, "isStartLoading", "Z"), state->total_bucket_count >= 1);
     env->SetIntField(resultObj, env->GetFieldID(resultClass, "bucketType", "I"), state->current_bucket_type);
 
-    // 填充 android.graphics.Rect (由于 Java 构造函数已 new Rect()，这里直接获取对象去赋值)
+    // 【新增】处理 C++ 字符串到 Java 字符串的转换
+    jstring jTicketId = env->NewStringUTF(state->ticket_id.c_str());
+    env->SetObjectField(resultObj, env->GetFieldID(resultClass, "ticketId", "Ljava/lang/String;"), jTicketId);
+    env->DeleteLocalRef(jTicketId);
+
+    // 填充 Rect (保持不变)
     jclass rectClass = env->FindClass("android/graphics/Rect");
     jfieldID leftField = env->GetFieldID(rectClass, "left", "I");
     jfieldID topField = env->GetFieldID(rectClass, "top", "I");
     jfieldID rightField = env->GetFieldID(rectClass, "right", "I");
     jfieldID bottomField = env->GetFieldID(rectClass, "bottom", "I");
 
-    // 设置铲斗 Rect
     jobject bucketRect = env->GetObjectField(resultObj, env->GetFieldID(resultClass, "bucketPosition", "Landroid/graphics/Rect;"));
     env->SetIntField(bucketRect, leftField, state->current_bucket_box.x);
     env->SetIntField(bucketRect, topField, state->current_bucket_box.y);
     env->SetIntField(bucketRect, rightField, state->current_bucket_box.x + state->current_bucket_box.width);
     env->SetIntField(bucketRect, bottomField, state->current_bucket_box.y + state->current_bucket_box.height);
 
-    // 设置卡车 Rect
     jobject truckRect = env->GetObjectField(resultObj, env->GetFieldID(resultClass, "truckPosition", "Landroid/graphics/Rect;"));
     env->SetIntField(truckRect, leftField, state->current_truck_box.x);
     env->SetIntField(truckRect, topField, state->current_truck_box.y);
     env->SetIntField(truckRect, rightField, state->current_truck_box.x + state->current_truck_box.width);
     env->SetIntField(truckRect, bottomField, state->current_truck_box.y + state->current_truck_box.height);
 
-    // 5. 触发回调，把组装好的 Java 对象推给安卓上层
+    // 触发回调
     jclass cbClass = env->GetObjectClass(callback);
     jmethodID onResultMethod = env->GetMethodID(cbClass, "onResult", "(Lcom/rosenshine/hhd/Excavator/ExcavatorResult;)V");
     env->CallVoidMethod(callback, onResultMethod, resultObj);
 
-    // 6. 严谨的 JNI 内存扫尾工作（防止 JNI Local Reference Table 撑爆）
     env->DeleteLocalRef(resultClass);
     env->DeleteLocalRef(resultObj);
     env->DeleteLocalRef(rectClass);
     env->DeleteLocalRef(bucketRect);
     env->DeleteLocalRef(truckRect);
     env->DeleteLocalRef(cbClass);
+}
+
+// ================= 3. 新增动态调参接口 =================
+JNIEXPORT void JNICALL
+Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_updateConfigNative(JNIEnv *env, jclass clazz, jlong handlePtr, jfloat confThresh, jfloat iouThresh, jfloat siameseThresh) {
+    if (handlePtr != 0) {
+        update_pipeline_config(reinterpret_cast<void*>(handlePtr), confThresh, iouThresh, siameseThresh);
+    }
 }
 
 // ================= 接口 5：安全释放 NPU 与内存池 =================
