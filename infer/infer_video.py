@@ -1,7 +1,7 @@
 import sys
 import io
-
 import numpy as np
+import time
 import torch
 
 # 强制将标准输出和错误输出设置为 utf-8
@@ -23,7 +23,7 @@ print = functools.partial(print, flush=True)
 
 
 class VideoTracker:
-    def __init__(self, video_path, model_path, output_path, siamese_model_path, tracker_config="bytetrack.yaml"):
+    def __init__(self, video_path, model_path, output_path, siamese_model_path, tracker_config="bytetrack.yaml", callback=None):
         """
         初始化视频跟踪器
 
@@ -39,16 +39,16 @@ class VideoTracker:
         self.tracker_config = tracker_config
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+        self.callback = callback
+
         # 计数器和状态标志
         self.total_truck_count = 0
         self.total_bucket_count = 0
         self.bucket_full = False
         self.dumping_active = False
 
-        # 记录上一斗的矿车画面
-        self.last_truck_img = None
-        self.previous_truck_img = None
-        self._last_dumping_box = None
+        self.current_ticket_id = None  # 当前装车票号
+        self.reference_truck_img = None  # 当前票号对应的车辆特征底图（锁定不漂移）
 
         # 加载模型
         print(f">>> 正在加载模型: {self.model_path}")
@@ -117,6 +117,12 @@ class VideoTracker:
         self.total_bucket_count = 0
         self.bucket_full = False
         print(">>> 计数器已重置")
+
+    @staticmethod
+    def _generate_ticket_id():
+        """生成唯一的装车票号 (使用时间戳)"""
+        import time
+        return f"TKT_{int(time.time() * 1000)}"
 
     @staticmethod
     def _letterbox(image, target_size=(224, 224)):
@@ -297,19 +303,20 @@ class VideoTracker:
         # ============================================================
         # 2. 处理 truck 状态转换（需要连续多帧确认）
         # ============================================================
-
         has_dumping = len(dumping_boxes) > 0
 
+        # 原版核心防抖：如果倒土时铲斗不是满的（意味着土已经倒下去了），直接 return，等待动作结束
         if has_dumping and not self.bucket_full:
             return
 
         if has_dumping and not self.dumping_active:
             self.dumping_active = True
 
-        # 记录最后一帧的dumping位置（有dumping时更新）
+        # 记录最后一帧的 dumping 位置（有 dumping 时持续更新）
         if has_dumping:
             self._last_dumping_box = dumping_boxes[0]['xyxy']
 
+        # 原版神级逻辑：只有当 dumping 彻底结束（扬尘消散），且土倒下去后，才截图比对
         if not has_dumping and self.dumping_active and not self.bucket_full:
 
             if self._last_dumping_box is not None and truck_boxes:
@@ -332,23 +339,35 @@ class VideoTracker:
                     expanded_bbox = self._expand_bbox_for_truck(closest_truck['xyxy'], frame.shape)
                     x1, y1, x2, y2 = expanded_bbox
                     truck_img = frame[y1:y2, x1:x2]
+
                     if truck_img.size > 0:
                         current_truck_img = self._letterbox(truck_img, (224, 224))
 
-                        # 如果有上一次的truck图片，用孪生网络判断
-                        if self.last_truck_img is not None:
-                            result = self._compare_trucks(self.last_truck_img, current_truck_img)
+                        # --- 修复原版缺失的第一辆车判断，并结合票号系统 ---
+                        if self.reference_truck_img is None:
+                            # 刚开机，第一辆车倒完第一铲！立刻生成票号并 +1
+                            self.current_ticket_id = self._generate_ticket_id()
+                            self.reference_truck_img = current_truck_img
+                            self.total_truck_count += 1
+                            print(
+                                f"  [计数] 第一辆车入场并完成首铲，票号: {self.current_ticket_id}，总数: {self.total_truck_count}")
+
+                        else:
+                            # 老规矩，交给 MobileNet 孪生网络判断
+                            result = self._compare_trucks(self.reference_truck_img, current_truck_img)
 
                             if result.get('is_same') is False:
+                                # 换新车了，且新车的第一铲土刚倒完！立刻生成新票号并 +1
+                                self.current_ticket_id = self._generate_ticket_id()
+                                self.reference_truck_img = current_truck_img
                                 self.total_truck_count += 1
-                                print(f"  [计数] 不同车辆，卡车计数 +1，当前总数: {self.total_truck_count}")
+                                print(
+                                    f"  [计数] 换车！新车完成首铲，票号: {self.current_ticket_id}，总数: {self.total_truck_count}")
                             else:
-                                print(f"  [计数] 同一辆车，不计数")
+                                # 还是这辆车，滚动更新一下参考图，防止特征漂移
+                                self.reference_truck_img = current_truck_img
 
-                        # 更新上一次的truck图片
-                        self.previous_truck_img = self.last_truck_img
-                        self.last_truck_img = current_truck_img
-
+            # 状态机彻底重置，等待下一次挖机倒土
             self.dumping_active = False
 
     def _compare_trucks(self, img1, img2, threshold=0.75):
@@ -474,6 +493,16 @@ class VideoTracker:
             self._update_state_machine(results[0], frame)
             trucks, buckets = self.get_counts()
 
+            if self.callback:
+                # 只有当有了票号才发送有效数据
+                if self.current_ticket_id is not None and not self.dumping_active:
+                    self.callback({
+                        "ticket_id": self.current_ticket_id,
+                        "truck_count": trucks,
+                        "bucket_count": buckets,
+                        "timestamp": time.time(),
+                    })
+
             # ---------------------------------------------------------
             # C. 画面渲染
             # ---------------------------------------------------------
@@ -504,27 +533,26 @@ class VideoTracker:
             display_block_height = self.height // 2 - 10  # 每个方块高度（留边距）
             display_block_width = display_block_height  # 正方形
 
-            # 显示 previous_truck_img（上半部分）
-            if self.previous_truck_img is not None:
-                display_img = cv2.resize(self.previous_truck_img, (display_block_width, display_block_height))
+            # 显示 reference_truck_img (当前票号锁定的车辆底图)
+            if hasattr(self, 'reference_truck_img') and self.reference_truck_img is not None:
+                # 调整底图大小并放到右上角
+                display_img = cv2.resize(self.reference_truck_img, (display_block_width, display_block_height))
                 output_canvas[10:10 + display_block_height, right_x:right_x + display_block_width] = display_img
-                cv2.putText(output_canvas, "Previous", (right_x, 30), font, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+
+                # 绘制文字：标识这是参考底图
+                cv2.putText(output_canvas, "Locked Target", (right_x + 5, 30), font, 0.6, (0, 255, 0), 1, cv2.LINE_AA)
+
+                # 顺便把当前的 Ticket ID 也显示在下方！
+                if self.current_ticket_id:
+                    cv2.putText(output_canvas, f"ID: {self.current_ticket_id}",
+                                (right_x, 10 + display_block_height + 30),
+                                font, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
             else:
+                # 如果还没车来，画个灰色的占位框
                 cv2.rectangle(output_canvas, (right_x, 10), (right_x + display_block_width, 10 + display_block_height),
                               (50, 50, 50), -1)
-
-            # 显示 last_truck_img（下半部分）
-            if self.last_truck_img is not None:
-                display_img = cv2.resize(self.last_truck_img, (display_block_width, display_block_height))
-                y_offset = 10 + display_block_height + 10
-                output_canvas[y_offset:y_offset + display_block_height,
-                right_x:right_x + display_block_width] = display_img
-                cv2.putText(output_canvas, "Current", (right_x, y_offset - 5), font, 0.6, (255, 255, 255), 1,
+                cv2.putText(output_canvas, "Waiting for truck...", (right_x + 5, 30), font, 0.5, (200, 200, 200), 1,
                             cv2.LINE_AA)
-            else:
-                y_offset = 10 + display_block_height + 10
-                cv2.rectangle(output_canvas, (right_x, y_offset),
-                              (right_x + display_block_width, y_offset + display_block_height), (50, 50, 50), -1)
 
             # 写入画布
             self.out.write(output_canvas)
@@ -540,24 +568,24 @@ class VideoTracker:
 
 
 if __name__ == "__main__":
-    TEST_VIDEO = "./tmp_files/test_video.mp4" # 输入的测试视频
-    TRAINED_MODEL = "./tmp_files/best.pt"  # 训练出的最佳权重
-    OUTPUT_VIDEO = "./tmp_files/output.mp4"  # 输出的视频名
+    TEST_VIDEO = "./tmp_files/test_video_shift.mp4"
+    TRAINED_MODEL = "./tmp_files/best.pt"
+    OUTPUT_VIDEO = "./tmp_files/output.mp4"
     SIAMESE_MODEL_PATH = "./tmp_files/attention_siamese_best.pth"
 
-    # 创建跟踪器实例
+    # 模拟外部业务接收函数
+    def client_business_logic(data):
+        print(f"回调数据: {data}")
+
+    # 创建跟踪器实例，传入 callback
     tracker = VideoTracker(
         video_path=TEST_VIDEO,
         model_path=TRAINED_MODEL,
         output_path=OUTPUT_VIDEO,
         siamese_model_path=SIAMESE_MODEL_PATH,
         tracker_config="bytetrack.yaml",
+        callback=client_business_logic,
     )
 
     # 运行推理
     tracker.run_video_inference()
-
-    # 示例：获取计数和重置
-    # truck_count, bucket_count = tracker.get_counts()
-    # print(f"最终统计 - 卡车: {truck_count}, 铲斗: {bucket_count}")
-    # tracker.reset_counts()
