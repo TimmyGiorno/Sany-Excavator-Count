@@ -9,7 +9,7 @@ MODEL_CONFIG = {
     # YOLO 检测模型参数
     'YOLO_ONNX_PATH': './tmp_files/best.onnx',
     'YOLO_OUTPUT_RKNN': './tmp_files/best.rknn',
-    'YOLO_DATASET_PATH': './yolo_dataset.txt',
+    'YOLO_DATASET_PATH': './dataset_yolo.txt',
     'INPUT_SIZE': (640, 640),
     'CLASSES': ['bucket-empty', 'bucket-full', 'truck', 'loading', 'dumping'],
     'REG_MAX': 16,
@@ -17,17 +17,17 @@ MODEL_CONFIG = {
     # 孪生网络重识别模型参数
     'SIAMESE_ONNX_PATH': './tmp_files/siamese_extractor.onnx',
     'SIAMESE_OUTPUT_RKNN': './tmp_files/siamese_extractor.rknn',
-    'SIAMESE_DATASET_PATH': './siamese_dataset.txt',
+    'SIAMESE_DATASET_PATH': './dataset_siamese.txt',
     'SIAMESE_INPUT_SIZE': (224, 224),
     'SIAMESE_THRESH': 0.75,  # 判定为同一辆车的重识别置信度阈值
 
     # 流水线与业务核心参数
-    'INPUT_VIDEO': './tmp_files/test_video_fast.mp4',
+    'INPUT_VIDEO': './tmp_files/shift_cut.mp4',
     'OUTPUT_VIDEO': './tmp_files/result_visualization.mp4',
     'NMS_OFFSET': 4096,
     'CONF_THRESH': 0.3,
     'IOU_THRESH': 0.45,
-    'MAX_FRAMES': 1000,  # 设为 > 0 用于截断快速测试，设为 0 则跑完整个视频
+    'MAX_FRAMES': 0,  # 设为 > 0 用于截断快速测试，设为 0 则跑完整个视频
 }
 
 CLASS_COLORS = {
@@ -155,14 +155,15 @@ def run_inference():
     rknn_siamese = RKNN(verbose=False)
 
     state = {
+        'ticket_id': None,
         'total_truck_count': 0,
         'total_bucket_count': 0,
+        'base_bucket_count': 0,
         'bucket_full': False,
         'dumping_active': False,
         'last_dumping_box': None,
-        'last_truck_img': None,
-        'previous_truck_img': None,
-        'last_truck_emb': None,
+        'reference_truck_img': None,
+        'reference_truck_emb': None,
     }
 
     try:
@@ -175,7 +176,7 @@ def run_inference():
         ret = rknn_yolo.build(do_quantization=True, dataset=MODEL_CONFIG['YOLO_DATASET_PATH'])
         if ret != 0:
             raise RuntimeError("YOLO 模型量化失败")
-        rknn_yolo.export_rknn(MODEL_CONFIG['YOLO_OUTPUT_RKNN'])
+        rknn_yolo.export_rknn(MODEL_CONFIG['YOLO_OUTPUT_RKNN']) # 导出 yolo 的 RKNN 模型
         if rknn_yolo.init_runtime() != 0:
             raise RuntimeError("启动 YOLO 硬件环境失败")
 
@@ -189,7 +190,7 @@ def run_inference():
         ret = rknn_siamese.build(do_quantization=True, dataset=MODEL_CONFIG['SIAMESE_DATASET_PATH'])
         if ret != 0:
             raise RuntimeError("Siamese 模型量化失败")
-        rknn_siamese.export_rknn(MODEL_CONFIG['SIAMESE_OUTPUT_RKNN'])
+        rknn_siamese.export_rknn(MODEL_CONFIG['SIAMESE_OUTPUT_RKNN']) # 导出 siamese 的 RKNN 模型
         if rknn_siamese.init_runtime() != 0:
             raise RuntimeError("启动 Siamese 硬件环境失败")
 
@@ -203,7 +204,6 @@ def run_inference():
         fps = cap.get(cv2.CAP_PROP_FPS)
         fps = fps if (0 < fps == fps) else 25.0
 
-        # 分屏画布尺寸计算：主画幅 + 右侧对齐正方形重识别看板 + 间距线宽度
         display_width = orig_h // 2
         canvas_w = orig_w + display_width + 20
         writer = cv2.VideoWriter(MODEL_CONFIG['OUTPUT_VIDEO'], cv2.VideoWriter_fourcc(*'mp4v'), fps, (canvas_w, orig_h))
@@ -224,32 +224,28 @@ def run_inference():
                 frame_count -= 1
                 break
 
-            # 图像预处理
             img, ratio, (dw, dh) = letterbox(frame, new_shape=MODEL_CONFIG['INPUT_SIZE'])
             img_tensor = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)[None, ...]
 
-            # === 第一阶段：YOLO 目标检测推理 ===
             start_time = time.time()
             outputs = rknn_yolo.inference(inputs=[img_tensor])
             infer_time_ms = (time.time() - start_time) * 1000
             total_infer_time += infer_time_ms
 
-            # 结果后处理
             results = post_process(outputs, ratio, dw, dh)
 
-            # 过滤并提取三大核心状态边界框容器
             truck_boxes = [r for r in results if r['class_id'] == 2]
             bucket_boxes = [r for r in results if r['class_id'] in [0, 1]]
             dumping_boxes = [r for r in results if r['class_id'] == 4]
 
             # === 第二阶段：业务逻辑状态机 ===
 
-            # A. 铲斗（Bucket）闭环状态机控制
+            # A. 铲斗绝对全局累加
             if bucket_boxes:
                 best_bucket = max(bucket_boxes, key=lambda x: x['score'])
                 b_box = [best_bucket['xmin'], best_bucket['ymin'], best_bucket['xmax'], best_bucket['ymax']]
 
-                if best_bucket['class_id'] == 1:  # bucket-full
+                if best_bucket['class_id'] == 1:
                     if not state['bucket_full']:
                         has_overlap = any(
                             check_horizontal_overlap(b_box, [t['xmin'], t['ymin'], t['xmax'], t['ymax']]) for t in
@@ -257,7 +253,7 @@ def run_inference():
                         if not has_overlap:
                             state['bucket_full'] = True
 
-                elif best_bucket['class_id'] == 0:  # bucket-empty
+                elif best_bucket['class_id'] == 0:
                     if state['bucket_full']:
                         has_overlap = any(
                             check_horizontal_overlap(b_box, [t['xmin'], t['ymin'], t['xmax'], t['ymax']]) for t in
@@ -268,29 +264,26 @@ def run_inference():
                         else:
                             state['bucket_full'] = False
 
-            # B. 卡车（Truck）卸料与 Siamese 孪生重识别状态机控制
+            # B. 卡车卸料与票号系统
             has_dumping = len(dumping_boxes) > 0
 
             if has_dumping and not state['bucket_full']:
-                pass  # 铲斗没满时的异常 dumping，直接忽略
+                pass
             else:
-                # 记录 dumping 状态的进入
                 if has_dumping and not state['dumping_active']:
                     state['dumping_active'] = True
 
-                # 记录最后一帧的 dumping 位置
                 if has_dumping:
                     state['last_dumping_box'] = [dumping_boxes[0]['xmin'], dumping_boxes[0]['ymin'],
                                                  dumping_boxes[0]['xmax'], dumping_boxes[0]['ymax']]
 
-                # 当 dumping 结束，且之前记录到位置时，触发重识别
+                # 倒土彻底结束且土已入车，触发截图比对
                 if not has_dumping and state['dumping_active'] and not state['bucket_full']:
                     if state['last_dumping_box'] is not None and truck_boxes:
                         ld_box = state['last_dumping_box']
                         dump_cx = (ld_box[0] + ld_box[2]) / 2
                         closest_truck, min_dist = None, float('inf')
 
-                        # 找到离 dumping 位置最近且有重叠的卡车
                         for truck in truck_boxes:
                             t_box = [truck['xmin'], truck['ymin'], truck['xmax'], truck['ymax']]
                             if check_horizontal_overlap(ld_box, t_box):
@@ -301,45 +294,50 @@ def run_inference():
                         if closest_truck:
                             t_box = [closest_truck['xmin'], closest_truck['ymin'], closest_truck['xmax'],
                                      closest_truck['ymax']]
-                            # 将卡车框扩展为正方形并裁剪
                             exp_box = expand_bbox_for_truck(t_box, frame.shape)
                             truck_crop = frame[exp_box[1]:exp_box[3], exp_box[0]:exp_box[2]]
 
                             if truck_crop.size > 0:
-                                # 启动第二硬件引擎：Siamese 提取车辆特征矩阵
                                 siamese_img = cv2.resize(truck_crop, MODEL_CONFIG['SIAMESE_INPUT_SIZE'],
                                                          interpolation=cv2.INTER_LINEAR)
                                 siamese_tensor = np.expand_dims(siamese_img, axis=0)
 
-                                # 推理得到 256 维特征向量
                                 current_emb = rknn_siamese.inference(inputs=[siamese_tensor])[0][0]
 
-                                if state['last_truck_emb'] is not None:
-                                    # 基于 L2 标准化特征向量的高速余弦相似度计算 (点积)
-                                    similarity = float(np.dot(state['last_truck_emb'], current_emb))
+                                # 票号与重识别判定
+                                if state['reference_truck_emb'] is not None:
+                                    similarity = float(np.dot(state['reference_truck_emb'], current_emb))
                                     if similarity < MODEL_CONFIG['SIAMESE_THRESH']:
+                                        # 换新车
                                         state['total_truck_count'] += 1
+                                        state['ticket_id'] = f"TKT_{int(time.time() * 1000)}"
+                                        # 换车发生在第一铲之后，所以基数为当前总数 - 1
+                                        state['base_bucket_count'] = max(0, state['total_bucket_count'] - 1)
                                         print(
-                                            f"-> 帧号: {frame_count:04d} | [重识别判定] 新卡车驶入 (相似度: {similarity:.2f}), 计数 +1")
+                                            f"-> 帧号: {frame_count:04d} | [新车入场] 相似度: {similarity:.2f}, 票号: {state['ticket_id']}")
                                     else:
-                                        print(
-                                            f"-> 帧号: {frame_count:04d} | [重识别判定] 原目标存留 (相似度: {similarity:.2f}), 拒绝计数")
+                                        print(f"-> 帧号: {frame_count:04d} | [原目标存留] 相似度: {similarity:.2f}")
                                 else:
+                                    # 系统启动第一辆车
                                     state['total_truck_count'] += 1
+                                    state['ticket_id'] = f"TKT_{int(time.time() * 1000)}"
+                                    state['base_bucket_count'] = max(0, state['total_bucket_count'] - 1)
                                     print(
-                                        f"-> 帧号: {frame_count:04d} | [系统初始化] 捕获首辆进入作业卡车，计数初始化 +1")
+                                        f"-> 帧号: {frame_count:04d} | [系统启动] 捕获首辆卡车, 票号: {state['ticket_id']}")
 
-                                # 更新状态字典中的图像和特征缓存
-                                state['previous_truck_img'] = state['last_truck_img']
-                                state['last_truck_img'] = truck_crop.copy()
-                                state['last_truck_emb'] = current_emb
+                                # 无条件滚动更新特征，防止特征漂移
+                                state['reference_truck_img'] = truck_crop.copy()
+                                state['reference_truck_emb'] = current_emb
 
-                    # 状态复位
                     state['dumping_active'] = False
 
             # === 第三阶段：最终可视化渲染 ===
 
-            # 1. 渲染 YOLO 目标检测框
+            # 计算业务层单车斗数
+            current_truck_buckets = 0
+            if state['ticket_id'] is not None:
+                current_truck_buckets = max(0, state['total_bucket_count'] - state['base_bucket_count'])
+
             for res in results:
                 label = MODEL_CONFIG['CLASSES'][res['class_id']]
                 color = CLASS_COLORS.get(label, (255, 255, 255))
@@ -349,51 +347,39 @@ def run_inference():
                 cv2.rectangle(frame, (res['xmin'], res['ymin'] - th - 5), (res['xmin'] + tw, res['ymin']), color, -1)
                 cv2.putText(frame, text, (res['xmin'], res['ymin'] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
 
-            # 2. 渲染左上角仪表盘 (Truck/Bucket 计数)
-            cv2.rectangle(frame, (20, 20), (320, 110), (0, 0, 0), -1)
-            cv2.putText(frame, f"Trucks:  {state['total_truck_count']}", (35, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
+            # 扩展了左上角面板以容纳票号
+            cv2.rectangle(frame, (20, 20), (450, 150), (0, 0, 0), -1)
+            cv2.putText(frame, f"Trucks: {state['total_truck_count']}", (35, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
                         (0, 255, 0), 2)
-            cv2.putText(frame, f"Buckets: {state['total_bucket_count']}", (35, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
+            cv2.putText(frame, f"Cur Buckets: {current_truck_buckets}", (35, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
                         (0, 255, 0), 2)
+            ticket_text = state['ticket_id'] if state['ticket_id'] else "Waiting..."
+            cv2.putText(frame, f"ID: {ticket_text}", (35, 135), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-            # 3. 构建宽屏输出画布
             output_canvas = np.zeros((orig_h, canvas_w, 3), dtype=np.uint8)
-            output_canvas[0:orig_h, 0:orig_w] = frame  # 将检测画面放入左侧
+            output_canvas[0:orig_h, 0:orig_w] = frame
 
             right_x = orig_w + 10
             block_h = orig_h // 2 - 15
 
-            # 4. 渲染右侧 Previous 面板
-            if state['previous_truck_img'] is not None:
-                p_resize = cv2.resize(state['previous_truck_img'], (display_width, block_h))
+            # 右侧 UI 简化为只显示锁定的特征图
+            if state['reference_truck_img'] is not None:
+                p_resize = cv2.resize(state['reference_truck_img'], (display_width, block_h))
                 output_canvas[10:10 + block_h, right_x:right_x + display_width] = p_resize
-                cv2.putText(output_canvas, "Previous Re-ID Target", (right_x + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                            (0, 255, 255), 1)
+                cv2.putText(output_canvas, "Locked Target", (right_x + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                            (0, 255, 0), 2)
             else:
                 cv2.rectangle(output_canvas, (right_x, 10), (right_x + display_width, 10 + block_h), (40, 40, 40), -1)
+                cv2.putText(output_canvas, "No Target", (right_x + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                            (150, 150, 150), 1)
 
-            # 5. 渲染右侧 Current 面板
-            if state['last_truck_img'] is not None:
-                c_resize = cv2.resize(state['last_truck_img'], (display_width, block_h))
-                y_offset = 10 + block_h + 10
-                output_canvas[y_offset:y_offset + block_h, right_x:right_x + display_width] = c_resize
-                cv2.putText(output_canvas, "Current Re-ID Target", (right_x + 10, y_offset + 20),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-            else:
-                y_offset = 10 + block_h + 10
-                cv2.rectangle(output_canvas, (right_x, y_offset), (right_x + display_width, y_offset + block_h),
-                              (40, 40, 40), -1)
-
-            # 6. 将合并后的画面写入视频文件
             writer.write(output_canvas)
 
-            # 打印控制台运行进度
             if frame_count > 0 and frame_count % 10 == 0:
                 avg_time = total_infer_time / frame_count
                 print(
                     f"帧数: {frame_count:04d} | 单帧组合推理耗时: {infer_time_ms:.2f} ms | 当前平均: {avg_time:.2f} ms")
 
-        # === 循环结束，打印终极性能报告 ===
         if frame_count > 0:
             avg_time = total_infer_time / frame_count
             print("\n==================== 性能分析报告 ====================")
@@ -404,9 +390,8 @@ def run_inference():
 
     except Exception as e:
         import traceback
-        print(f"❌ 商业流水线运行时异常捕获:\n{traceback.format_exc()}")
+        print(f"❌ 流水线运行时异常捕获:\n{traceback.format_exc()}")
     finally:
-        # 安全闭合所有 I/O 句柄及 NPU 资源池
         if 'cap' in locals() and cap.isOpened(): cap.release()
         if 'writer' in locals(): writer.release()
         rknn_yolo.release()

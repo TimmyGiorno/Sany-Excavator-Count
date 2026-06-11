@@ -55,9 +55,14 @@ docker build -t rknn-toolkit2:v1 .
 2.4. 启动并挂载目录，把该目录映射到容器里的 `/workspace` 目录。
 
 ```bash
-
 docker run -it --name rknn_sim -v .:/workspace rknn-toolkit2:v1 /bin/bash
 cd workspace
+```
+
+之后进入该目录，只需要运行以下指令：
+
+```bash
+docker exec -it rknn_sim /bin/bash
 ```
 
 2.5. 进入环境，尝试以下指令，若无报错，则安装完成：
@@ -74,9 +79,9 @@ python -c "from rknn.api import RKNN; print('RKNN Installed!')"
 不能直接使用官方默认的 `yolo export` 命令。
 标准的 YOLO 模型会在网络的最末端（Detect 头）包含大量的复杂非线性操作，
 例如 DFL 坐标解码、Softmax、Sigmoid 以及特征张量拼接（Concat）。
-这些操作对于 INT8 量化极其不友好。如果强行将其打包送入 NPU 计算，
-会因超出 INT8 数值表示范围而导致精度瞬间坍塌，
-输出结果全为 0.0 或产生异常高得离谱的置信度。
+这些操作对于 `INT8` 量化极其不友好。如果强行将其打包送入 NPU 计算，
+会因超出 `INT8` 数值表示范围而导致精度瞬间坍塌，
+输出结果全为 `0.0` 或产生异常高得离谱的置信度。
 
 因此，行业内的标准做法是导出一个 “砍头版”（Headless）模型：
 即通过代码强行剔除 Detect 层的后处理逻辑，
@@ -84,11 +89,11 @@ python -c "from rknn.api import RKNN; print('RKNN Installed!')"
 则统一交由外部的 CPU 使用 Python 或 C++ 来完成。
 
 为了绕过官方库各种版本之间的依赖冲突，
-我们在项目目录中提供了一个直接导出脚本 `pt2onnx.py`。
-请确保你训练好的 `best.pt` 权重文件与该脚本在同一目录下。
+我们在项目目录中提供了两个导出脚本 `pt2onnx_siamese.py` 和 `pt2onnx_yolo.py`。
+请参考代码获取细节。
 
 拿到生成的 `best.onnx` 后，强烈建议使用 [Netron](https://netron.app/) 可视化工具打开查看模型尾部结构。
-正确的模型最底部不能只有一个 1x...x8400 维度的独立输出节点。它应该呈现出 3 个（或更多）独立并列的输出分支（分别对应大、中、小三种特征图的原始卷积输出）。确认无误后，即可进入下一步的量化环节。
+正确的 YOLO 模型最底部不能只有一个 1x...x8400 维度的独立输出节点。它应该呈现出 3 个（或更多）独立并列的输出分支（分别对应大、中、小三种特征图的原始卷积输出）。确认无误后，即可进入下一步的量化环节。
 
 ##### 3.2. datasets 校准量化
 
@@ -102,5 +107,17 @@ RKNN 的 `dataset.txt` 用来做模型校准，当你把高精度的 ONNX 模型
 ...
 ```
 
-从原始数据构建校准数据，请参考 `prepare_dataset.py`，只需要将存有图片的 `raw_imgs` 文件夹放置于该目录中，
-即可自动生成 `calibration_imgs` 文件夹和 `dataset.txt`。
+- 从原始数据构建校准 YOLO 的数据，请参考 `prepare_dataset_yolo.py`，只需要将存有图片的 `raw_imgs_yolo` 文件夹放置于该目录中，
+即可自动生成 `calibration_imgs` 文件夹和 `dataset_yolo.txt`。
+- 对于 Siamese 模型的校准数据集构建，请参考 `infer` 包的 `truck_extract.py` 文件。
+`prepare_dataset_yolo.py` 只用于生成 `dataset_siamese.txt`。
+
+##### 3.3. 运行模型量化导出与视频测试
+
+在 Docker 环境中，运行以下指令进行测试：
+
+```bash
+python infer_video_and_export.py
+```
+
+导出的模型和输出结果都在该目录的 `tmp_files` 目录中。

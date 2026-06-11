@@ -19,9 +19,6 @@ import functools
 print = functools.partial(print, flush=True)
 
 
-# =================================
-
-
 class VideoTracker:
     def __init__(self, video_path, model_path, output_path, siamese_model_path, tracker_config="bytetrack.yaml", callback=None):
         """
