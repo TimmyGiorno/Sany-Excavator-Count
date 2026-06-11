@@ -3,20 +3,15 @@ import os
 import time
 from typing import Dict, Any
 
-# ================= 配置区 =================
+# ================= 配置区 ============================================================
 VIDEO_CONFIG = {
     'INPUT_VIDEO': './tmp_files/test_video_shift.mp4',  # 原始视频路径
     'OUTPUT_VIDEO': './tmp_files/test_video_shift_fast.mp4',  # 加速后的视频保存路径
     'SPEED_FACTOR': 5.0,  # 加速倍数（例如：4.0 表示 4 倍速）
 }
 
-
-# ==========================================
-
+# ====================================================================================
 def accelerate_video(config: Dict[str, Any]):
-    """
-    高效视频加速核心流水线
-    """
     input_path = config['INPUT_VIDEO']
     output_path = config['OUTPUT_VIDEO']
     speed_factor = config['SPEED_FACTOR']
@@ -35,11 +30,10 @@ def accelerate_video(config: Dict[str, Any]):
     orig_fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    # 防御性编程：防止部分视频获取 FPS 失败
+    # 防止部分视频获取 FPS 失败
     fps = orig_fps if (orig_fps > 0 and orig_fps == orig_fps) else 25.0
 
     # 3. 创建输出视频写入器（保持原视频的分辨率和帧率）
-    # 确保输出目录存在
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     writer = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (orig_w, orig_h))
 
@@ -48,7 +42,6 @@ def accelerate_video(config: Dict[str, Any]):
     print(f"--> 开始进行 {speed_factor} 倍速抽帧加速处理...")
 
     start_time = time.time()
-    current_frame_idx = 0
     saved_frame_count = 0
 
     try:
@@ -59,7 +52,7 @@ def accelerate_video(config: Dict[str, Any]):
             if target_frame_idx >= total_frames:
                 break
 
-            # 密集型快进：利用 CAP_PROP_POS_FRAMES 强行让硬件解码器指针“瞬移”
+            # 利用 CAP_PROP_POS_FRAMES 强行让硬件解码器指针瞬移
             cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame_idx)
 
             ret, frame = cap.read()
@@ -88,7 +81,6 @@ def accelerate_video(config: Dict[str, Any]):
     except Exception as e:
         print(f"❌ 视频加速流水线发生异常: {str(e)}")
     finally:
-        # 安全回收资源
         cap.release()
         writer.release()
         print("--> 视频流资源已安全释放。")
