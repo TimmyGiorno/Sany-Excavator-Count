@@ -185,6 +185,14 @@ Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_detectNative(JNIEnv *env, jc
     env->SetObjectField(resultObj, env->GetFieldID(resultClass, "ticketId", "Ljava/lang/String;"), jTicketId);
     env->DeleteLocalRef(jTicketId);
 
+    if (!state->reference_truck_emb.empty()) {
+        int featureSize = state->reference_truck_emb.size();
+        jfloatArray featureArray = env->NewFloatArray(featureSize);
+        env->SetFloatArrayRegion(featureArray, 0, featureSize, state->reference_truck_emb.data());
+        env->SetObjectField(resultObj, env->GetFieldID(resultClass, "truckFeature", "[F"), featureArray);
+        env->DeleteLocalRef(featureArray);
+    }
+
     // 填充 Rect (保持不变)
     jclass rectClass = env->FindClass("android/graphics/Rect");
     jfieldID leftField = env->GetFieldID(rectClass, "left", "I");
@@ -238,6 +246,24 @@ Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_releaseNative(JNIEnv *env, j
 
         LOGI("Hardware pipeline resources released completely.");
     }
+}
+
+// ================= 新增：从 Java 接收断电恢复数据 =================
+JNIEXPORT void JNICALL
+Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_restoreStateNative(JNIEnv *env, jclass clazz, jlong handlePtr, jstring ticketId, jint bucketCount, jfloatArray featureArray) {
+    if (handlePtr == 0 || !featureArray) return;
+
+    const char* t_id = env->GetStringUTFChars(ticketId, 0);
+    int feature_len = env->GetArrayLength(featureArray);
+    jfloat* feature_data = env->GetFloatArrayElements(featureArray, NULL);
+
+    // 灌入底层 C++
+    restore_pipeline_state(reinterpret_cast<void*>(handlePtr), t_id, bucketCount, feature_data, feature_len);
+
+    // 释放内存锁
+    env->ReleaseFloatArrayElements(featureArray, feature_data, JNI_ABORT);
+    env->ReleaseStringUTFChars(ticketId, t_id);
+    LOGI("Hardware Pipeline State Restored: %s, Buckets: %d", t_id, bucketCount);
 }
 
 } // extern "C"

@@ -12,6 +12,8 @@ public class ExcavatorResult {
     private int currentShovelCount;       // 当前第几铲（经过业务层计算后的每车真实斗数）
     private boolean isComplete;           // 是否装车完成(刚换新车)
 
+    private float[] truckFeature;
+
     // JNI C++ 层专用的构造函数（必须存在，且需初始化 Rect 防止空指针）
     public ExcavatorResult() {
         this.bucketPosition = new Rect();
@@ -44,4 +46,7 @@ public class ExcavatorResult {
 
     public boolean isComplete() { return isComplete; }
     public void setComplete(boolean complete) { this.isComplete = complete; }
+
+    public float[] getTruckFeature() { return truckFeature; }
+    public void setTruckFeature(float[] truckFeature) { this.truckFeature = truckFeature; }
 }

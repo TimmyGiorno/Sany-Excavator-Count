@@ -118,9 +118,22 @@ public:
         if (rknn_siamese) rknn_destroy(rknn_siamese);
     }
 
-    // 暴露配置更新接口
     void updateConfig(const PipelineConfig& new_config) {
         this->config = new_config;
+    }
+
+    void restoreState(const std::string& ticket_id, int bucket_count, const float* feature_data, int feature_dim) {
+        state.ticket_id = ticket_id;
+        state.total_bucket_count = bucket_count;
+
+        // 恢复特征向量
+        if (feature_data && feature_dim > 0) {
+            state.reference_truck_emb.assign(feature_data, feature_data + feature_dim);
+        }
+
+        // 重置临时状态，防止因为上次断电时的残留状态导致死锁
+        state.dumping_active = false;
+        state.bucket_full = false;
     }
 
     const PipelineState& getState() const {
@@ -415,5 +428,12 @@ extern "C" {
 
     void release_pipeline(void* handle) {
         if (handle) delete (ExcavatorPipeline*)handle;
+    }
+
+    void restore_pipeline_state(void* handle, const char* ticket_id, int bucket_count, const float* feature_data, int feature_dim) {
+        if (handle) {
+            std::string t_id = ticket_id ? std::string(ticket_id) : "";
+            ((ExcavatorPipeline*)handle)->restoreState(t_id, bucket_count, feature_data, feature_dim);
+        }
     }
 }
