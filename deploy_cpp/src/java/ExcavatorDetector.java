@@ -44,6 +44,8 @@ public class ExcavatorDetector {
     private static native void updateConfigNative(long handle, float confThresh, float iouThresh, float siameseThresh);
     private static native void releaseNative(long handle);
 
+    private static native void restoreStateNative(long handle, String ticketId, int bucketCount, float[] feature);
+
     // ========================================================
     // 核心暴露接口区：提供给外部 Java/Android 业务层调用的控制台
     // ========================================================
@@ -203,6 +205,29 @@ public class ExcavatorDetector {
 
         if (nativeHandle != 0) {
             releaseNative(nativeHandle);
+        }
+    }
+
+    /**
+     * 【重要新增】：断电/重启 状态恢复接口
+     * 在调用 init 成功后立即调用此方法，将数据库中最后一次未结算的车辆特征灌入。
+     * @param ticketId 上次断电前最后正在装载的票号
+     * @param lastBuckets 上次断电前这辆车已经装载的真实斗数
+     * @param feature 上次断电前保存的 256维特征向量 (从 getTruckFeature() 获得)
+     */
+    public static void restoreState(String ticketId, int lastBuckets, float[] feature) {
+        if (nativeHandle != 0 && feature != null && feature.length > 0) {
+            // 1. 将数据灌入 C++ 底层感知器
+            restoreStateNative(nativeHandle, ticketId, lastBuckets, feature);
+
+            // 2. 同步 Java 层的业务状态机
+            currentActiveTicket = ticketId;
+            // 【核心数学逻辑】：因为底层 C++ 的绝对斗数被我们强行恢复成了 lastBuckets。
+            // 为了让后续相减 (实际斗数 = 绝对斗数 - 基数) 的公式依然成立并顺延，
+            // 此时 Java 层的基数必须设为 0。
+            baseBucketCount = 0;
+            isCurrentTruckSettled = false;
+            lastReportedBuckets = lastBuckets;
         }
     }
 }

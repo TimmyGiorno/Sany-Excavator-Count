@@ -1,5 +1,4 @@
-#ifndef EXCAVATOR_PIPELINE_H
-#define EXCAVATOR_PIPELINE_H
+#pragma once
 
 // ================= 跨平台动态库导出宏定义 =================
 #if defined(_WIN32) || defined(_WIN64)
@@ -30,11 +29,12 @@ extern "C" {
     // 4. 释放资源
     EXCAVATOR_API void release_pipeline(void* handle);
 
-    // 5. 动态调参接口
+    // 5. 动态调参
     EXCAVATOR_API void update_pipeline_config(void* handle, float conf_thresh, float iou_thresh, float siamese_thresh);
+
+    // 6. 断电恢复
+    EXCAVATOR_API void restore_pipeline_state(void* handle, const char* ticket_id, int bucket_count, const float* feature_data, int feature_dim);
 
 #ifdef __cplusplus
 }
 #endif
-
-#endif // EXCAVATOR_PIPELINE_H
