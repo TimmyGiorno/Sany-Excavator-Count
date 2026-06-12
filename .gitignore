@@ -215,7 +215,7 @@ _files/
 /infer/tmp_files/
 /infer/dumping_truck_extracts/
 
+/rknn2_sim_deploy/calibration_imgs_siamese/
 /rknn2_sim_deploy/calibration_imgs_yolo/
 /rknn2_sim_deploy/raw_imgs_yolo/
-/rknn2_sim_deploy/siamese_calibration_imgs/
 /rknn2_sim_deploy/tmp_files/
