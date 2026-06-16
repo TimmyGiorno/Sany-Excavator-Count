@@ -1,26 +1,26 @@
+#include "excavator_pipeline.h"
 #include "rknn_api.h"
 #include <opencv2/opencv.hpp>
 #include <vector>
 #include <string>
-#include <cmath>
 #include <algorithm>
 #include <chrono>
 
 // ================= 配置与数据结构 =================
-// 将原有的宏定义改为可通过 JNI 动态配置的结构体
 struct PipelineConfig {
     int yolo_input_w = 640;
     int yolo_input_h = 640;
     int yolo_reg_max = 16;
-    int siamese_input_size = 224;
 
     float conf_thresh = 0.3f;
     float iou_thresh = 0.45f;
-    float siamese_thresh = 0.75f;
     int nms_offset = 4096;
+
+    long long timeout_ms = 60000;
+    float decline_thresh = 0.75f;
 };
 
-const std::vector<std::string> CLASSES = {"bucket-empty", "bucket-full", "truck", "loading", "dumping"};
+const std::vector<std::string> CLASSES = {"bucket-empty", "bucket-full", "truck", "loading", "dumping", "mine"};
 
 struct BBox {
     int xmin, ymin, xmax, ymax;
@@ -28,152 +28,249 @@ struct BBox {
     int class_id;
 };
 
+// ================= 服务器事件结构 =================
+struct BucketEvent {
+    std::string ticket_id;
+    int total_truck_count;
+    int current_bucket_count;
+    long long dump_start_time;
+    long long dump_end_time;
+};
+
+struct TruckEvent {
+    std::string ticket_id;
+    int total_truck_count;
+    int total_bucket_count;
+    long long load_start_time;
+    long long load_end_time;
+};
+
+struct TimeoutEvent {
+    std::string ticket_id;
+};
+
+// 挂起缓冲的临时结构
+struct PendingBucket {
+    long long dump_start_time;
+    long long dump_end_time;
+};
+
+// ================= 状态机与缓存区 =================
 struct PipelineState {
-    std::string ticket_id = "";        // 当前装车票号 (时间戳生成)
-    int total_truck_count = 0;         // 绝对总车数
-    int total_bucket_count = 0;        // 绝对总铲数 (永不重置)
+    std::string ticket_id = "WAITING";
+    int total_truck_count = 0;
+    int total_bucket_count = 0;
+    int current_truck_buckets = 0;
+
+    // 挂起机制字段
+    int pending_buckets = 0;
+    int frames_since_bucket_empty = 0;
+    std::vector<PendingBucket> pending_queue;
+
+    // 超时锁
+    bool has_pushed_timeout = false;
 
     bool bucket_full = false;
     bool dumping_active = false;
-    cv::Rect last_dumping_box;
+    int dumping_frame_count = 0;
 
-    // 底图滚动更新，防止特征漂移
-    cv::Mat reference_truck_img;
-    std::vector<float> reference_truck_emb;
+    long long current_dump_start_time = 0;
+    long long truck_load_start_time = 0;
+    long long truck_load_end_time = 0;
+    long long last_dump_end_time = 0;
+    long long last_action_time = 0;
 
-    // 暴露给 Java 层的当前帧状态 (用于 UI 绘制和业务判断)
-    cv::Rect current_bucket_box = cv::Rect(0,0,0,0);
-    int current_bucket_type = -1;  // -1无, 0空, 1满
+    bool is_truck_active = false;
+
+    cv::Rect last_dumping_box = cv::Rect(0,0,0,0);
     cv::Rect current_truck_box = cv::Rect(0,0,0,0);
+    cv::Rect last_dumping_bucket_box = cv::Rect(0,0,0,0);
 
-    // 关键事件触发器：当此标志为 true 时，Java 层应记录新车的起始斗数
-    bool is_new_truck_entered = false;
+    // 真实面积统计判定字段
+    int stable_frames_remaining = 0;
+    bool is_statting = false;
+    int stat_frames_remaining = 0;
+    std::vector<float> ratio_buffer;
+    float last_avg_ratio = -1.0f;
+
+    // 服务器事件队列
+    std::vector<BucketEvent> pending_bucket_events;
+    std::vector<TruckEvent> pending_truck_events;
+    std::vector<TimeoutEvent> pending_timeout_events;
 };
 
 class ExcavatorPipeline {
 private:
     rknn_context rknn_yolo = 0;
-    rknn_context rknn_siamese = 0;
     PipelineState state;
     PipelineConfig config;
 
-    // 生成时间戳票号
-    std::string generate_ticket_id() {
+    static std::string generate_ticket_id() {
         auto now = std::chrono::system_clock::now();
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
         return "TKT_" + std::to_string(ms);
     }
 
-    // YOLO Letterbox 预处理
+    static long long get_current_time_ms() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+
     cv::Mat letterbox(cv::Mat& img, float& ratio, int& dw, int& dh) {
         int h = img.rows, w = img.cols;
         ratio = std::min((float)config.yolo_input_w / w, (float)config.yolo_input_h / h);
         int new_unpad_w = std::round(w * ratio);
         int new_unpad_h = std::round(h * ratio);
-
         dw = (config.yolo_input_w - new_unpad_w) / 2;
         dh = (config.yolo_input_h - new_unpad_h) / 2;
-
-        cv::Mat resized;
+        cv::Mat resized, output;
         if (w != new_unpad_w || h != new_unpad_h) {
             cv::resize(img, resized, cv::Size(new_unpad_w, new_unpad_h), 0, 0, cv::INTER_LINEAR);
         } else {
             resized = img.clone();
         }
-
-        cv::Mat output;
         cv::copyMakeBorder(resized, output, dh, config.yolo_input_h - new_unpad_h - dh,
                            dw, config.yolo_input_w - new_unpad_w - dw,
                            cv::BORDER_CONSTANT, cv::Scalar(114, 114, 114));
         return output;
     }
 
-    bool check_horizontal_overlap(const cv::Rect& b1, const cv::Rect& b2) {
+    static bool check_horizontal_overlap(const cv::Rect& b1, const cv::Rect& b2) {
         return !(b1.x + b1.width < b2.x || b2.x + b2.width < b1.x);
     }
 
-    float cosine_similarity(const std::vector<float>& v1, const std::vector<float>& v2) {
-        if (v1.size() != v2.size() || v1.empty()) return 0.0f;
-        float dot = 0.0f, denom1 = 0.0f, denom2 = 0.0f;
-        for (size_t i = 0; i < v1.size(); ++i) {
-            dot += v1[i] * v2[i];
-            denom1 += v1[i] * v1[i];
-            denom2 += v2[i] * v2[i];
+    // 彻底结算旧车（触发装车完成事件数据上传）
+    void force_complete_truck() {
+        if (state.is_truck_active) {
+            TruckEvent te;
+            te.ticket_id = state.ticket_id;
+            te.total_truck_count = state.total_truck_count;
+            te.total_bucket_count = state.current_truck_buckets;
+            te.load_start_time = state.truck_load_start_time;
+
+            // 【修复 2】：绝对兜底时间。万一中途没有任何卸料就切车，使用最后活跃时间填补 0 漏洞
+            long long end_time = state.truck_load_end_time > 0 ? state.truck_load_end_time : state.last_action_time;
+            if (end_time <= 0) end_time = get_current_time_ms();
+            te.load_end_time = end_time;
+
+            state.pending_truck_events.push_back(te);
+
+            state.is_truck_active = false;
+            state.ticket_id = "WAITING";
+            state.current_truck_buckets = 0;
+            state.has_pushed_timeout = false;
+            state.last_avg_ratio = -1.0f;
         }
-        return dot / (std::sqrt(denom1) * std::sqrt(denom2));
+    }
+
+    // 将挂起的铲数提交生效并生成铲斗事件上传
+    void commit_pending_buckets() {
+        for (const auto& pb : state.pending_queue) {
+            state.current_truck_buckets++;
+            state.truck_load_end_time = pb.dump_end_time; // 正常工作时，此处会刷新 load_end_time
+
+            BucketEvent be;
+            be.ticket_id = state.ticket_id;
+            be.total_truck_count = state.total_truck_count;
+            be.current_bucket_count = state.current_truck_buckets;
+            be.dump_start_time = pb.dump_start_time;
+            be.dump_end_time = pb.dump_end_time;
+            state.pending_bucket_events.push_back(be);
+        }
+        state.pending_buckets = 0;
+        state.pending_queue.clear();
+    }
+
+    // 发生切车时的快速更迭
+    void cut_truck(long long now) {
+        force_complete_truck();
+        state.is_truck_active = true;
+        state.total_truck_count++;
+        state.ticket_id = generate_ticket_id();
+        state.current_truck_buckets = 0;
+        state.has_pushed_timeout = false;
+        state.last_action_time = now;
+
+        if (!state.pending_queue.empty()) {
+            state.truck_load_start_time = state.pending_queue[0].dump_start_time;
+        } else {
+            state.truck_load_start_time = now;
+        }
+        commit_pending_buckets();
     }
 
 public:
-    ExcavatorPipeline(const void* yolo_data, const int yolo_size, const void* siamese_data, const int siamese_size) {
+    ExcavatorPipeline(const void* yolo_data, const int yolo_size) {
         if (yolo_data && yolo_size > 0) {
             rknn_init(&rknn_yolo, const_cast<void *>(yolo_data), yolo_size, 0, nullptr);
-        }
-        if (siamese_data && siamese_size > 0) {
-            rknn_init(&rknn_siamese, const_cast<void *>(siamese_data), siamese_size, 0, nullptr);
+            state.last_action_time = get_current_time_ms();
         }
     }
 
-    ~ExcavatorPipeline() {
-        if (rknn_yolo) rknn_destroy(rknn_yolo);
-        if (rknn_siamese) rknn_destroy(rknn_siamese);
-    }
+    ~ExcavatorPipeline() { if (rknn_yolo) rknn_destroy(rknn_yolo); }
+    void updateConfig(const PipelineConfig& new_config) { long long old = config.timeout_ms; this->config = new_config; this->config.timeout_ms = old; }
+    void setTimeout(long long timeout_ms) { this->config.timeout_ms = timeout_ms; }
 
-    void updateConfig(const PipelineConfig& new_config) {
-        this->config = new_config;
-    }
-
-    void restoreState(const std::string& ticket_id, int bucket_count, const float* feature_data, int feature_dim) {
+    void restoreState(const std::string& ticket_id, int bucket_count, float last_mineral_ratio) {
         state.ticket_id = ticket_id;
-        state.total_bucket_count = bucket_count;
+        state.current_truck_buckets = bucket_count;
+        state.last_avg_ratio = last_mineral_ratio;
+        if (bucket_count > 0) {
+            state.is_truck_active = true;
+            long long now = get_current_time_ms();
+            state.truck_load_start_time = now;
+            // 【修复 1】：强行恢复进来的车，兜底全部时间属性和总车数属性
+            state.truck_load_end_time = now;
+            state.last_dump_end_time = now;
+            state.last_action_time = now;
 
-        // 恢复特征向量
-        if (feature_data && feature_dim > 0) {
-            state.reference_truck_emb.assign(feature_data, feature_data + feature_dim);
+            if (state.total_truck_count == 0) {
+                state.total_truck_count = 1;
+            }
         }
-
-        // 重置临时状态，防止因为上次断电时的残留状态导致死锁
-        state.dumping_active = false;
-        state.bucket_full = false;
     }
 
-    const PipelineState& getState() const {
-        return state;
+    void clear_events() {
+        state.pending_bucket_events.clear();
+        state.pending_truck_events.clear();
+        state.pending_timeout_events.clear();
     }
+
+    PipelineState& getState() { return state; }
 
     void process(cv::Mat& frame) {
-        // 每次推理前，重置事件触发器，避免向 Java 层发送重复事件
-        state.current_bucket_type = -1;
-        state.current_bucket_box = cv::Rect(0,0,0,0);
-        state.current_truck_box = cv::Rect(0,0,0,0);
-        state.is_new_truck_entered = false;
+        long long now = get_current_time_ms();
+        state.frames_since_bucket_empty++;
 
-        // ========== 1. YOLO 推理 ==========
+        // A. 物理时间超时校验 (一车仅推送一次，不清空车号)
+        if ((state.current_truck_buckets > 0 || state.pending_buckets > 0) && (now - state.last_action_time > config.timeout_ms)) {
+            if (!state.has_pushed_timeout) {
+                state.has_pushed_timeout = true;
+                TimeoutEvent to_ev;
+                to_ev.ticket_id = state.ticket_id;
+                state.pending_timeout_events.push_back(to_ev);
+            }
+        }
+
+        // YOLO 前处理与推理
         float ratio; int dw, dh;
         cv::Mat prep_img = letterbox(frame, ratio, dw, dh);
         cv::cvtColor(prep_img, prep_img, cv::COLOR_BGR2RGB);
 
-        rknn_input inputs[1];
-        memset(inputs, 0, sizeof(inputs));
-        inputs[0].index = 0;
-        inputs[0].type = RKNN_TENSOR_UINT8;
+        rknn_input inputs[1]; memset(inputs, 0, sizeof(inputs));
+        inputs[0].index = 0; inputs[0].type = RKNN_TENSOR_UINT8;
         inputs[0].size = config.yolo_input_w * config.yolo_input_h * 3;
-        inputs[0].fmt = RKNN_TENSOR_NHWC;
-        inputs[0].buf = prep_img.data;
+        inputs[0].fmt = RKNN_TENSOR_NHWC; inputs[0].buf = prep_img.data;
         rknn_inputs_set(rknn_yolo, 1, inputs);
 
         rknn_run(rknn_yolo, NULL);
 
-        // ========== 2. DFL 解码与后处理 ==========
-        rknn_output yolo_outputs[3];
-        memset(yolo_outputs, 0, sizeof(yolo_outputs));
+        rknn_output yolo_outputs[3]; memset(yolo_outputs, 0, sizeof(yolo_outputs));
         for (int i = 0; i < 3; ++i) yolo_outputs[i].want_float = 1;
         rknn_outputs_get(rknn_yolo, 3, yolo_outputs, NULL);
 
-        std::vector<BBox> results;
         std::vector<cv::Rect> nms_boxes;
         std::vector<float> nms_scores;
         std::vector<int> nms_class_ids;
-
         int strides[3] = {8, 16, 32};
         int num_classes = CLASSES.size();
 
@@ -194,34 +291,22 @@ public:
                         float raw_val = out_ptr[c_idx];
                         raw_val = std::max(-88.0f, std::min(88.0f, raw_val));
                         float score = 1.0f / (1.0f + std::exp(-raw_val));
-                        if (score > max_score) {
-                            max_score = score;
-                            best_class = c;
-                        }
+                        if (score > max_score) { max_score = score; best_class = c; }
                     }
 
                     if (max_score > config.conf_thresh) {
                         float dfl_preds[4];
                         for (int k = 0; k < 4; ++k) {
-                            float max_reg = -1e9f;
-                            std::vector<float> reg_raw(config.yolo_reg_max);
+                            float max_reg = -1e9f; std::vector<float> reg_raw(config.yolo_reg_max);
                             for (int r = 0; r < config.yolo_reg_max; ++r) {
-                                int r_idx = (k * config.yolo_reg_max + r) * map_size + spatial_idx;
-                                float val = out_ptr[r_idx];
-                                reg_raw[r] = val;
-                                if (val > max_reg) max_reg = val;
+                                float val = out_ptr[(k * config.yolo_reg_max + r) * map_size + spatial_idx];
+                                reg_raw[r] = val; if (val > max_reg) max_reg = val;
                             }
-
-                            float sum_exp = 0.0f;
-                            float dfl_val = 0.0f;
+                            float sum_exp = 0.0f; float dfl_val = 0.0f;
                             for (int r = 0; r < config.yolo_reg_max; ++r) {
-                                float exp_val = std::exp(reg_raw[r] - max_reg);
-                                reg_raw[r] = exp_val;
-                                sum_exp += exp_val;
+                                reg_raw[r] = std::exp(reg_raw[r] - max_reg); sum_exp += reg_raw[r];
                             }
-                            for (int r = 0; r < config.yolo_reg_max; ++r) {
-                                dfl_val += (reg_raw[r] / sum_exp) * r;
-                            }
+                            for (int r = 0; r < config.yolo_reg_max; ++r) dfl_val += (reg_raw[r] / sum_exp) * r;
                             dfl_preds[k] = dfl_val;
                         }
 
@@ -247,193 +332,221 @@ public:
         std::vector<int> indices;
         std::vector<cv::Rect> offset_boxes;
         for (size_t i = 0; i < nms_boxes.size(); ++i) {
-            offset_boxes.push_back(cv::Rect(
-                nms_boxes[i].x + nms_class_ids[i] * config.nms_offset,
-                nms_boxes[i].y + nms_class_ids[i] * config.nms_offset,
-                nms_boxes[i].width, nms_boxes[i].height
-            ));
+            offset_boxes.push_back(cv::Rect(nms_boxes[i].x + nms_class_ids[i] * config.nms_offset,
+                nms_boxes[i].y + nms_class_ids[i] * config.nms_offset, nms_boxes[i].width, nms_boxes[i].height));
         }
-
         cv::dnn::NMSBoxes(offset_boxes, nms_scores, config.conf_thresh, config.iou_thresh, indices);
 
+        std::vector<BBox> truck_boxes, bucket_boxes, dumping_boxes, mine_boxes;
         for (int idx : indices) {
-            BBox box;
-            box.xmin = nms_boxes[idx].x;
-            box.ymin = nms_boxes[idx].y;
-            box.xmax = nms_boxes[idx].x + nms_boxes[idx].width;
-            box.ymax = nms_boxes[idx].y + nms_boxes[idx].height;
-            box.score = nms_scores[idx];
-            box.class_id = nms_class_ids[idx];
-            results.push_back(box);
+            BBox box = {nms_boxes[idx].x, nms_boxes[idx].y, nms_boxes[idx].x + nms_boxes[idx].width, nms_boxes[idx].y + nms_boxes[idx].height, nms_scores[idx], nms_class_ids[idx]};
+            if (box.class_id == 2) truck_boxes.push_back(box);
+            else if (box.class_id == 0 || box.class_id == 1) bucket_boxes.push_back(box);
+            else if (box.class_id == 4) dumping_boxes.push_back(box);
+            else if (box.class_id == 5) mine_boxes.push_back(box);
         }
 
-        // ========== 3. 业务逻辑状态机 ==========
-        std::vector<BBox> truck_boxes, bucket_boxes, dumping_boxes;
-        for (const auto& r : results) {
-            if (r.class_id == 2) truck_boxes.push_back(r);
-            else if (r.class_id == 0 || r.class_id == 1) bucket_boxes.push_back(r);
-            else if (r.class_id == 4) dumping_boxes.push_back(r);
-        }
-
-        if (!truck_boxes.empty()) {
-            auto best_truck = truck_boxes[0];
-            state.current_truck_box = cv::Rect(best_truck.xmin, best_truck.ymin, best_truck.xmax - best_truck.xmin, best_truck.ymax - best_truck.ymin);
-        }
-
-        // A. 铲斗状态更新 (保持全局独立累加，不做清零处理)
+        // === B. 铲斗满空判定与解锁 ===
         if (!bucket_boxes.empty()) {
             auto best_bucket = bucket_boxes[0];
-            for (const auto& b : bucket_boxes) if (b.score > best_bucket.score) best_bucket = b;
-
-            cv::Rect b_rect(best_bucket.xmin, best_bucket.ymin, best_bucket.xmax - best_bucket.xmin, best_bucket.ymax - best_bucket.ymin);
-            state.current_bucket_box = b_rect;
-            state.current_bucket_type = best_bucket.class_id;
+            for (const auto& bx : bucket_boxes) if (bx.score > best_bucket.score) best_bucket = bx;
+            cv::Rect bb_rect(best_bucket.xmin, best_bucket.ymin, best_bucket.xmax - best_bucket.xmin, best_bucket.ymax - best_bucket.ymin);
 
             if (best_bucket.class_id == 1) {
+                if (state.pending_buckets > 0) commit_pending_buckets();
                 if (!state.bucket_full) {
                     bool overlap = false;
-                    for (const auto& t : truck_boxes) {
-                        if (check_horizontal_overlap(b_rect, cv::Rect(t.xmin, t.ymin, t.xmax - t.xmin, t.ymax - t.ymin))) overlap = true;
+                    for (auto& t : truck_boxes) {
+                        if (check_horizontal_overlap(bb_rect, cv::Rect(t.xmin, t.ymin, t.xmax-t.xmin, t.ymax-t.ymin))) { overlap = true; break; }
                     }
                     if (!overlap) state.bucket_full = true;
                 }
             } else if (best_bucket.class_id == 0) {
                 if (state.bucket_full) {
                     bool overlap = false;
-                    for (const auto& t : truck_boxes) {
-                        if (check_horizontal_overlap(b_rect, cv::Rect(t.xmin, t.ymin, t.xmax - t.xmin, t.ymax - t.ymin))) overlap = true;
+                    for (auto& t : truck_boxes) {
+                        if (check_horizontal_overlap(bb_rect, cv::Rect(t.xmin, t.ymin, t.xmax-t.xmin, t.ymax-t.ymin))) { overlap = true; break; }
                     }
-                    state.bucket_full = false;
-                    if (overlap) state.total_bucket_count++; // 全局计数，交由 Java 层去做减法
-                }
-            }
-        }
+                    if (overlap) {
+                        state.bucket_full = false;
+                        state.total_bucket_count++;
+                        state.pending_buckets++;
+                        state.frames_since_bucket_empty = 0;
+                        state.last_action_time = now;
+                        state.has_pushed_timeout = false;
 
-        // B. 卡车卸料与孪生网络特征重识别 (原版完美 FSM)
-        bool has_dumping = !dumping_boxes.empty();
-
-        if (has_dumping && !state.bucket_full) return; // 防抖，未满斗不判定
-
-        if (has_dumping && state.bucket_full) {
-            if (!state.dumping_active) state.dumping_active = true;
-            state.last_dumping_box = cv::Rect(dumping_boxes[0].xmin, dumping_boxes[0].ymin,
-                                              dumping_boxes[0].xmax - dumping_boxes[0].xmin, dumping_boxes[0].ymax - dumping_boxes[0].ymin);
-        }
-
-        // 倒土彻底结束（尘埃落定）且土已入车，触发截图比对
-        if (!has_dumping && state.dumping_active && !state.bucket_full) {
-            if (state.last_dumping_box.area() > 0 && !truck_boxes.empty()) {
-                float dump_cx = state.last_dumping_box.x + state.last_dumping_box.width / 2.0f;
-                BBox closest_truck; float min_dist = 1e9;
-                bool found = false;
-
-                for (const auto& t : truck_boxes) {
-                    cv::Rect t_rect(t.xmin, t.ymin, t.xmax - t.xmin, t.ymax - t.ymin);
-                    if (check_horizontal_overlap(state.last_dumping_box, t_rect)) {
-                        float dist = std::abs((t.xmin + (t.xmax - t.xmin) / 2.0f) - dump_cx);
-                        if (dist < min_dist) { min_dist = dist; closest_truck = t; found = true; }
-                    }
-                }
-
-                if (found) {
-                    int w = closest_truck.xmax - closest_truck.xmin;
-                    int h = closest_truck.ymax - closest_truck.ymin;
-                    int size = std::max(w, h);
-                    int cx = closest_truck.xmin + w / 2;
-                    int cy = closest_truck.ymin + h / 2;
-
-                    cv::Rect crop_rect(cx - size/2, cy - size/2, size, size);
-                    crop_rect &= cv::Rect(0, 0, frame.cols, frame.rows);
-
-                    cv::Mat truck_crop = frame(crop_rect);
-                    if (!truck_crop.empty()) {
-                        cv::Mat siamese_in;
-                        cv::resize(truck_crop, siamese_in, cv::Size(config.siamese_input_size, config.siamese_input_size));
-                        cv::cvtColor(siamese_in, siamese_in, cv::COLOR_BGR2RGB);
-
-                        rknn_input s_inputs[1];
-                        memset(s_inputs, 0, sizeof(s_inputs));
-                        s_inputs[0].index = 0;
-                        s_inputs[0].type = RKNN_TENSOR_UINT8;
-                        s_inputs[0].size = config.siamese_input_size * config.siamese_input_size * 3;
-                        s_inputs[0].fmt = RKNN_TENSOR_NHWC;
-                        s_inputs[0].buf = siamese_in.data;
-                        rknn_inputs_set(rknn_siamese, 1, s_inputs);
-
-                        rknn_run(rknn_siamese, NULL);
-
-                        rknn_output s_outputs[1];
-                        memset(s_outputs, 0, sizeof(s_outputs));
-                        s_outputs[0].want_float = 1;
-                        rknn_outputs_get(rknn_siamese, 1, s_outputs, NULL);
-
-                        float* emb_data = (float*)s_outputs[0].buf;
-                        std::vector<float> current_emb(emb_data, emb_data + 256);
-
-                        if (!state.reference_truck_emb.empty()) {
-                            float sim = cosine_similarity(state.reference_truck_emb, current_emb);
-                            if (sim < config.siamese_thresh) {
-                                // 更换新车
-                                state.total_truck_count++;
-                                state.ticket_id = generate_ticket_id();
-                                state.is_new_truck_entered = true;
-                            }
-                        } else {
-                            // 系统启动后的第一辆车
+                        if (!state.is_truck_active) {
+                            state.is_truck_active = true;
                             state.total_truck_count++;
                             state.ticket_id = generate_ticket_id();
-                            state.is_new_truck_entered = true;
+                            state.current_truck_buckets = 0;
+                            state.truck_load_start_time = state.current_dump_start_time > 0 ? state.current_dump_start_time : now;
                         }
 
-                        // 无论换车与否，滚动更新参考特征以应对装载造成的特征漂移
-                        state.reference_truck_img = truck_crop.clone();
-                        state.reference_truck_emb = current_emb;
-
-                        rknn_outputs_release(rknn_siamese, 1, s_outputs);
+                        PendingBucket pb;
+                        pb.dump_start_time = state.current_dump_start_time > 0 ? state.current_dump_start_time : now;
+                        pb.dump_end_time = now;
+                        state.pending_queue.push_back(pb);
+                    } else {
+                        state.bucket_full = false;
                     }
                 }
             }
-            state.dumping_active = false;
+        }
+
+        // === C. 跟踪 Dumping 状态 ===
+        bool has_dumping = !dumping_boxes.empty();
+        if (has_dumping) {
+            state.dumping_frame_count++;
+            if (state.dumping_frame_count == 1) state.current_dump_start_time = now;
+            if (state.dumping_frame_count >= 3) state.dumping_active = true;
+
+            if (state.stable_frames_remaining > 0 || state.is_statting) {
+                state.stable_frames_remaining = 0;
+                state.is_statting = false;
+                state.stat_frames_remaining = 0;
+                state.ratio_buffer.clear();
+                state.current_truck_box = cv::Rect(0,0,0,0);
+                state.last_dumping_bucket_box = cv::Rect(0,0,0,0);
+            }
+        } else {
+            state.dumping_frame_count = 0;
+            if (state.dumping_active) {
+                state.dumping_active = false;
+                state.stable_frames_remaining = 1;
+                if (!bucket_boxes.empty()) {
+                    auto b = bucket_boxes[0];
+                    for (const auto& bx : bucket_boxes) if (bx.score > b.score) b = bx;
+                    state.last_dumping_bucket_box = cv::Rect(b.xmin, b.ymin, b.xmax - b.xmin, b.ymax - b.ymin);
+                } else {
+                    state.last_dumping_bucket_box = cv::Rect(0,0,0,0);
+                }
+            }
+        }
+
+        // === D. 寻找用于计算比值的卡车 ===
+        if (state.stable_frames_remaining > 0) {
+            state.stable_frames_remaining--;
+            if (state.stable_frames_remaining == 0) {
+                if (state.last_dumping_bucket_box.area() == 0 && !bucket_boxes.empty()) {
+                    auto b = bucket_boxes[0];
+                    for (const auto& bx : bucket_boxes) if (bx.score > b.score) b = bx;
+                    state.last_dumping_bucket_box = cv::Rect(b.xmin, b.ymin, b.xmax - b.xmin, b.ymax - b.ymin);
+                }
+
+                if (state.last_dumping_bucket_box.area() > 0 && !truck_boxes.empty()) {
+                    state.is_statting = true;
+                    state.ratio_buffer.clear();
+                    state.stat_frames_remaining = 5;
+
+                    float min_dist = 1e9;
+                    float b_cx = state.last_dumping_bucket_box.x + state.last_dumping_bucket_box.width / 2.0f;
+
+                    for (const auto& t : truck_boxes) {
+                        float t_cx = t.xmin + (t.xmax - t.xmin) / 2.0f;
+                        float dist = std::abs(t_cx - b_cx);
+                        if (dist < min_dist) {
+                            min_dist = dist;
+                            state.current_truck_box = cv::Rect(t.xmin, t.ymin, t.xmax - t.xmin, t.ymax - t.ymin);
+                        }
+                    }
+                    state.last_dumping_bucket_box = cv::Rect(0,0,0,0);
+                } else {
+                    state.stable_frames_remaining = 1;
+                }
+            }
+        }
+
+        // === E. 真实比例断崖下跌计算 ===
+        if (state.is_statting && state.stat_frames_remaining > 0) {
+            state.stat_frames_remaining--;
+
+            if (state.current_truck_box.area() > 0 && !truck_boxes.empty()) {
+                float min_dist = 1e9;
+                cv::Rect best_t(0,0,0,0);
+                float prev_cx = state.current_truck_box.x + state.current_truck_box.width / 2.0f;
+
+                for (const auto& t : truck_boxes) {
+                    float t_cx = t.xmin + (t.xmax - t.xmin) / 2.0f;
+                    float dist = std::abs(t_cx - prev_cx);
+                    if (dist < min_dist) {
+                        min_dist = dist;
+                        best_t = cv::Rect(t.xmin, t.ymin, t.xmax - t.xmin, t.ymax - t.ymin);
+                    }
+                }
+
+                if (best_t.area() > 0) {
+                    state.current_truck_box = best_t;
+                    float truck_area = best_t.area();
+                    float max_mine_area = 0;
+                    for (const auto& m : mine_boxes) {
+                        cv::Rect m_rect(m.xmin, m.ymin, m.xmax - m.xmin, m.ymax - m.ymin);
+                        if (check_horizontal_overlap(best_t, m_rect)) {
+                            float m_area = m_rect.area();
+                            if (m_area > max_mine_area) max_mine_area = m_area;
+                        }
+                    }
+                    state.ratio_buffer.push_back(max_mine_area / truck_area);
+                } else {
+                    state.ratio_buffer.push_back(0.0f);
+                }
+            } else {
+                state.ratio_buffer.push_back(0.0f);
+            }
+
+            if (state.stat_frames_remaining == 0) {
+                state.is_statting = false;
+                float sum = 0; for(float r: state.ratio_buffer) sum += r;
+                float avg_ratio = state.ratio_buffer.empty() ? 0.0f : (sum / state.ratio_buffer.size());
+
+                if (state.last_avg_ratio < 0) {
+                    state.last_avg_ratio = avg_ratio;
+                    if (state.pending_buckets > 0) commit_pending_buckets();
+                } else {
+                    if (state.last_avg_ratio == 0.0f && avg_ratio == 0.0f) {
+                        if (state.pending_buckets > 0) commit_pending_buckets();
+                    } else {
+                        float decline = state.last_avg_ratio > 0 ? (state.last_avg_ratio - avg_ratio) / state.last_avg_ratio : 0.0f;
+                        if (avg_ratio == 0.0f || decline >= config.decline_thresh) {
+                            cut_truck(now);
+                        } else {
+                            if (state.pending_buckets > 0) commit_pending_buckets();
+                        }
+                    }
+                    state.last_avg_ratio = avg_ratio;
+                }
+                state.current_truck_box = cv::Rect(0,0,0,0);
+            }
+        }
+
+        // === F. 快速强行合并兜底 ===
+        if (state.pending_buckets > 0 && state.frames_since_bucket_empty > 15) {
+            commit_pending_buckets();
         }
     }
 };
 
-// ================= C 风格导出实现 (适配 JNI) =================
 extern "C" {
-    void* init_pipeline_from_memory(const void* yolo_data, const int yolo_size, const void* siamese_data, const int siamese_size) {
-        return new ExcavatorPipeline(yolo_data, yolo_size, siamese_data, siamese_size);
-    }
-
+    void* init_pipeline_from_memory(const void* yolo_data, const int yolo_size) { return new ExcavatorPipeline(yolo_data, yolo_size); }
     void process_frame(void* handle, unsigned char* img_data, int width, int height, int channels) {
         if (!handle || !img_data) return;
         int type = (channels == 3) ? CV_8UC3 : CV_8UC1;
         cv::Mat frame(height, width, type, img_data);
         ((ExcavatorPipeline*)handle)->process(frame);
     }
-
-    void* get_pipeline_state(void* handle) {
-        if (!handle) return nullptr;
-        return (void*)&(((ExcavatorPipeline*)handle)->getState());
-    }
-
-    // 新增：允许 Java 运行时动态调整参数
-    void update_pipeline_config(void* handle, float conf_thresh, float iou_thresh, float siamese_thresh) {
+    void* get_pipeline_state(void* handle) { return handle ? (void*)&(((ExcavatorPipeline*)handle)->getState()) : nullptr; }
+    void update_pipeline_config(void* handle, float conf_thresh, float iou_thresh) {
         if (!handle) return;
-        PipelineConfig cfg;
-        cfg.conf_thresh = conf_thresh;
-        cfg.iou_thresh = iou_thresh;
-        cfg.siamese_thresh = siamese_thresh;
+        PipelineConfig cfg; cfg.conf_thresh = conf_thresh; cfg.iou_thresh = iou_thresh;
         ((ExcavatorPipeline*)handle)->updateConfig(cfg);
     }
-
-    void release_pipeline(void* handle) {
-        if (handle) delete (ExcavatorPipeline*)handle;
-    }
-
-    void restore_pipeline_state(void* handle, const char* ticket_id, int bucket_count, const float* feature_data, int feature_dim) {
+    void release_pipeline(void* handle) { if (handle) delete (ExcavatorPipeline*)handle; }
+    void restore_pipeline_state(void* handle, const char* ticket_id, int bucket_count, float last_mineral_ratio) {
         if (handle) {
             std::string t_id = ticket_id ? std::string(ticket_id) : "";
-            ((ExcavatorPipeline*)handle)->restoreState(t_id, bucket_count, feature_data, feature_dim);
+            ((ExcavatorPipeline*)handle)->restoreState(t_id, bucket_count, last_mineral_ratio);
         }
     }
+    void set_pipeline_timeout(void* handle, long long timeout_ms) { if (handle) ((ExcavatorPipeline*)handle)->setTimeout(timeout_ms); }
+    void clear_pipeline_events(void* handle) { if (handle) ((ExcavatorPipeline*)handle)->clear_events(); }
 }
