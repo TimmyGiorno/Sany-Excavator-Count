@@ -22,6 +22,7 @@ def process_labels(labels_dir):
         4: 2,  # truck (原) -> truck
         5: 3,  # loading
         6: 4,  # dumping
+        7: 5,  # mine
     }
 
     total_modified_files = 0
@@ -90,7 +91,7 @@ def process_labels(labels_dir):
 
 def main():
     # 设置路径 - 注意这里要指向datasetV1.2（根据你之前提供的路径）
-    dataset_root = r'E:\pycharmProjects\Sany-Excavator-Count\train\datasets\datasetV1.2'
+    dataset_root = r'E:\pycharmProjects\Sany-Excavator-Count\train\datasets\datasetV1.3'
 
     print("=" * 60)
     print("YOLOv8 标签类别映射脚本")
@@ -103,6 +104,7 @@ def main():
     print("  原4 (truck)        -> 新2 (truck)")
     print("  原5 (loading)      -> 新3 (loading)")
     print("  原6 (dumping)      -> 新4 (dumping)")
+    print("  原7 (mine)         -> 新5 (mine)")
 
     print("\n" + "=" * 60)
     print("开始处理标签文件")
@@ -121,6 +123,7 @@ def main():
     print("  - 类别2: truck (合并后)")
     print("  - 类别3: loading")
     print("  - 类别4: dumping")
+    print("  - 类别5: mine")
     print(f"\n处理后的标签文件位于: {dataset_root}")
 
 

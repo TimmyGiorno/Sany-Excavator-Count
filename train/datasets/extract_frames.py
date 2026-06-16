@@ -56,11 +56,19 @@ def extract_frames(video_path: str, output_dir: str, interval: int = 10):
 #     extract_frames(VIDEO_FILE, OUTPUT_FOLDER)
 if __name__ == "__main__":
     # 定义基础路径和视频名称
-    BASE_PATH = "E:/pycharmProjects/Sany-Excavator-Count/train/datasets/datasetV1.2/"
+    BASE_PATH = "E:/pycharmProjects/Sany-Excavator-Count/train/datasets/datasetV1.3/"
     VIDEO_NAMES = [
+        "JFSK_20251230_110914_N1_00",
+        "JFSK_20251230_113914_N1_00",
+        "JFSK_20251230_115914_N1_00",
+        "JFSK_20251230_120914_N1_00",
         "JFSK_20251230_121914_N1_00",
         "JFSK_20251230_154914_N1_00",
-        "JFSK_20251230_155914_N1_00"
+        "JFSK_20251230_155914_N1_00",
+        "JFSK_20251230_165914_N1_00",
+        "JFSK_20251230_170914_N1_00",
+        "JFSK_20251230_172915_N1_00",
+        "JFSK_20251231_004916_N1_00"
     ]
 
     # 自动生成路径
