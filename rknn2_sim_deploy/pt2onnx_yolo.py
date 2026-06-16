@@ -3,7 +3,7 @@ import torch
 from ultralytics import YOLO
 
 print("正在加载模型 best.pt ...")
-model = YOLO("best.pt")
+model = YOLO("./tmp_files/best.pt")
 
 def headless_forward(self, x):
     """
