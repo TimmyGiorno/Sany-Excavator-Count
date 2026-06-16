@@ -40,20 +40,16 @@ def extract_frames(video_path: str, output_dir: str, interval: int = 10):
 
             if saved_count % 50 == 0:
                 print(
-                    f"[train:datasets:extract_frames] 已保存 {saved_count} 张图片 (当前正处理视频第 {frame_index}/{total_frames} 帧)...")
+                    f"[train:datasets:extract_frames] 已保存 {saved_count} 张图片"
+                    f" (当前正处理视频第 {frame_index}/{total_frames} 帧)...")
 
         frame_index += 1
 
     cap.release()
-    print(
-        f"[train:datasets:extract_frames] 抽取完成！视频共 {total_frames} 帧，按每 {interval} 帧抽 1 张，最终得到 {saved_count} 张图片。")
+    print(f"[train:datasets:extract_frames] 抽取完成！视频共 {total_frames} 帧，"
+          f"按每 {interval} 帧抽 1 张，最终得到 {saved_count} 张图片。")
 
 
-# if __name__ == "__main__":
-#     VIDEO_FILE = "E:/data/datasetsV1.1/JFSK_20251230_115914_N1_00/JFSK_20251230_115914_N1_00.mp4"
-#     OUTPUT_FOLDER = "E:/data/datasetsV1.1/JFSK_20251230_115914_N1_00/images/train"
-#
-#     extract_frames(VIDEO_FILE, OUTPUT_FOLDER)
 if __name__ == "__main__":
     # 定义基础路径和视频名称
     BASE_PATH = "E:/pycharmProjects/Sany-Excavator-Count/train/datasets/datasetV1.3/"

@@ -209,5 +209,13 @@ __marimo__/
 .idea/
 
 _files/
-/rknn_sim_deploy/tmp_files/
+
+/deploy_cpp/3rdparty
+
+/infer/tmp_files/
 /infer/dumping_truck_extracts/
+
+/rknn2_sim_deploy/calibration_imgs_siamese/
+/rknn2_sim_deploy/calibration_imgs_yolo/
+/rknn2_sim_deploy/raw_imgs_yolo/
+/rknn2_sim_deploy/tmp_files/
