@@ -6,10 +6,10 @@ from typing import List, Tuple, Dict, Any
 
 # ================= 配置区 =================
 MODEL_CONFIG = {
-    'YOLO_ONNX_PATH': './tmp_files/best.onnx',
-    'YOLO_OUTPUT_RKNN': './tmp_files/best.rknn',
+    'YOLO_ONNX_PATH': './tmp_files/best_320.onnx',
+    'YOLO_OUTPUT_RKNN': './tmp_files/best_320.rknn',
     'YOLO_DATASET_PATH': './dataset_yolo.txt',
-    'INPUT_SIZE': (640, 640),
+    'INPUT_SIZE': (320, 320),
     'CLASSES': ['bucket-empty', 'bucket-full', 'truck', 'loading', 'dumping', 'mine'],
     'REG_MAX': 16,
 

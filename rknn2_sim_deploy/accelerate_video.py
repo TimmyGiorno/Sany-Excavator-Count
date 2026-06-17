@@ -5,8 +5,8 @@ from typing import Dict, Any
 
 # ================= 配置区 ============================================================
 VIDEO_CONFIG = {
-    'INPUT_VIDEO': './tmp_files/9f8cedc79d8b824a95cca11894ca232a.mp4',  # 原始视频路径
-    'OUTPUT_VIDEO': './tmp_files/test_video_shift_fast_v.mp4',  # 加速后的视频保存路径
+    'INPUT_VIDEO': './tmp_files/bug_1.mp4',  # 原始视频路径
+    'OUTPUT_VIDEO': './tmp_files/bug_1_fast.mp4',  # 加速后的视频保存路径
     'SPEED_FACTOR': 5.0,  # 加速倍数（例如：4.0 表示 4 倍速）
 }
 

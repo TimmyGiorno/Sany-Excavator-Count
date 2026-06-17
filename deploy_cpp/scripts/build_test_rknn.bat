@@ -35,7 +35,7 @@ adb shell chmod +x /data/local/tmp/test_excavator
 adb push --sync %NDK_PATH%\toolchains\llvm\prebuilt\windows-x86_64\sysroot\usr\lib\aarch64-linux-android\libc++_shared.so /data/local/tmp/
 adb push --sync ./3rdparty/opencv/opencv-4.13.0-android-sdk/OpenCV-android-sdk/sdk/native/libs/arm64-v8a/libopencv_java4.so /data/local/tmp/
 adb push --sync ./3rdparty/rknn/android/arm64-v8a/librknnrt.so /data/local/tmp/
-adb push --sync ./tmp_files/best.rknn /data/local/tmp/
+adb push --sync ./tmp_files/best_320.rknn /data/local/tmp/
 adb push --sync ./tmp_files/test_video_shift_fast.mp4 /data/local/tmp/
 
 echo.
@@ -50,21 +50,21 @@ echo -------------------------------------------------------
 echo ▶ 执行测试 1：常规视频流推理 (每100帧输出性能耗时)
 echo -------------------------------------------------------
 :: 常规测试传入 3 个参数：<yolo模型> <视频> <test_mode=1>
-adb shell "export LD_LIBRARY_PATH=/data/local/tmp:$LD_LIBRARY_PATH && /data/local/tmp/test_excavator /data/local/tmp/best.rknn /data/local/tmp/test_video_shift_fast.mp4 1 /data/local/tmp/out_frames/frame_%%04d.jpg"
+adb shell "export LD_LIBRARY_PATH=/data/local/tmp:$LD_LIBRARY_PATH && /data/local/tmp/test_excavator /data/local/tmp/best_320.rknn /data/local/tmp/test_video_shift_fast.mp4 1 /data/local/tmp/out_frames/frame_%%04d.jpg"
 
 echo.
 echo -------------------------------------------------------
 echo ▶ 执行测试 2：纯断电恢复状态流测试
 echo -------------------------------------------------------
 :: 一键测试开机直接从断电中恢复的场景 (对应 test_mode=2)
-adb shell "export LD_LIBRARY_PATH=/data/local/tmp:$LD_LIBRARY_PATH && /data/local/tmp/test_excavator /data/local/tmp/best.rknn /data/local/tmp/test_video_shift_fast.mp4 2"
+adb shell "export LD_LIBRARY_PATH=/data/local/tmp:$LD_LIBRARY_PATH && /data/local/tmp/test_excavator /data/local/tmp/best_320.rknn /data/local/tmp/test_video_shift_fast.mp4 2"
 
 echo.
 echo -------------------------------------------------------
 echo ▶ 执行测试 3：纯挂机/业务超时预警测试 (触发单次推送)
 echo -------------------------------------------------------
 :: 一键测试正常作业中突然停工卡死12秒的超时上报场景 (对应 test_mode=3)
-adb shell "export LD_LIBRARY_PATH=/data/local/tmp:$LD_LIBRARY_PATH && /data/local/tmp/test_excavator /data/local/tmp/best.rknn /data/local/tmp/test_video_shift_fast.mp4 3"
+adb shell "export LD_LIBRARY_PATH=/data/local/tmp:$LD_LIBRARY_PATH && /data/local/tmp/test_excavator /data/local/tmp/best_320.rknn /data/local/tmp/test_video_shift_fast.mp4 3"
 
 echo.
 echo =======================================================
