@@ -3,7 +3,7 @@ import torch
 from ultralytics import YOLO
 
 print("正在加载模型 best.pt ...")
-model = YOLO("./tmp_files/best.pt")
+model = YOLO("./tmp_files/best_320.pt")
 
 def headless_forward(self, x):
     """
@@ -25,6 +25,6 @@ detect_head.export = False
 # ==================================================
 
 print("正在导出纯净版 ONNX ...")
-model.export(format="onnx", imgsz=640, opset=12, simplify=True)
+model.export(format="onnx", imgsz=320, opset=12, simplify=True)
 
 print("导出完成！")

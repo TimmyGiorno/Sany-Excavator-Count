@@ -12,12 +12,20 @@ public class ExcavatorResult {
     private int currentShovelCount;
     private boolean isComplete;
 
+    // ================== 全量检测框数组 ==================
+    // 格式：[left1, top1, right1, bottom1, classId1, left2, top2, ...]
+    // 0 空斗 1 满斗 2 卡车 3 载矿 4 卸矿 5 矿
+    private int[] allDetections;
+
     public ExcavatorResult() {
         this.bucketPosition = new Rect();
         this.truckPosition = new Rect();
         this.bucketType = -1;
         this.ticketId = "";
     }
+
+    public int[] getAllDetections() { return allDetections; }
+    public void setAllDetections(int[] allDetections) { this.allDetections = allDetections; }
 
     public String getTicketId() { return ticketId; }
     public void setTicketId(String ticketId) { this.ticketId = ticketId; }

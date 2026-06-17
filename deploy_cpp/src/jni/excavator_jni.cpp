@@ -111,12 +111,12 @@ Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_detectNative(JNIEnv *env, jc
     process_frame(handle, bgr.data, bgr.cols, bgr.rows, 3);
 
     // ================= 严格对齐最新状态机的内部结构 =================
-    // 增加 last_mineral_ratio 与 completed_type
     struct BucketEvent { std::string ticket_id; int total_truck_count; int current_bucket_count; long long dump_start_time; long long dump_end_time; float last_mineral_ratio; };
     struct TruckEvent { std::string ticket_id; int total_truck_count; int total_bucket_count; long long load_start_time; long long load_end_time; int completed_type; };
     struct PendingBucket { long long dump_start_time; long long dump_end_time; };
 
-    // 移除 pending_timeout_events
+    struct BBox { int xmin, ymin, xmax, ymax; float score; int class_id; };
+
     struct PipelineStateMem {
         std::string ticket_id;
         int total_truck_count;
@@ -133,6 +133,10 @@ Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_detectNative(JNIEnv *env, jc
         bool dumping_active;
         int dumping_frame_count;
 
+        // 【新增】严格对齐 C++ 端的新变量
+        int retry_count;
+        int max_retry_count;
+
         long long current_dump_start_time;
         long long truck_load_start_time;
         long long truck_load_end_time;
@@ -144,6 +148,11 @@ Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_detectNative(JNIEnv *env, jc
         cv::Rect last_dumping_box;
         cv::Rect current_truck_box;
         cv::Rect last_dumping_bucket_box;
+
+        cv::Rect ui_bucket_box;
+        cv::Rect ui_truck_box;
+
+        std::vector<BBox> ui_all_detections;
 
         int stable_frames_remaining;
         bool is_statting;
@@ -161,13 +170,12 @@ Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_detectNative(JNIEnv *env, jc
     jclass resultClass = env->FindClass("com/rosenshine/hhd/Excavator/ExcavatorResult");
     jobject resultObj = env->NewObject(resultClass, env->GetMethodID(resultClass, "<init>", "()V"));
 
-    // 分分秒秒同步刷新最新的单车铲数和状态
     env->SetIntField(resultObj, env->GetFieldID(resultClass, "currentShovelCount", "I"), state->current_truck_buckets);
     env->SetBooleanField(resultObj, env->GetFieldID(resultClass, "isLoading", "Z"), state->dumping_active);
     env->SetBooleanField(resultObj, env->GetFieldID(resultClass, "isComplete", "Z"), !state->pending_truck_events.empty());
     env->SetBooleanField(resultObj, env->GetFieldID(resultClass, "isStartLoading", "Z"), state->current_truck_buckets >= 1);
 
-    int bucketType = state->bucket_full ? 1 : (state->last_dumping_bucket_box.area() > 0 ? 0 : -1);
+    int bucketType = state->bucket_full ? 1 : (state->ui_bucket_box.area() > 0 ? 0 : -1);
     env->SetIntField(resultObj, env->GetFieldID(resultClass, "bucketType", "I"), bucketType);
 
     jstring jTicketId = env->NewStringUTF(state->ticket_id.c_str());
@@ -181,21 +189,39 @@ Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_detectNative(JNIEnv *env, jc
     jfieldID bottomField = env->GetFieldID(rectClass, "bottom", "I");
 
     jobject bucketRect = env->GetObjectField(resultObj, env->GetFieldID(resultClass, "bucketPosition", "Landroid/graphics/Rect;"));
-    env->SetIntField(bucketRect, leftField, state->last_dumping_bucket_box.x);
-    env->SetIntField(bucketRect, topField, state->last_dumping_bucket_box.y);
-    env->SetIntField(bucketRect, rightField, state->last_dumping_bucket_box.x + state->last_dumping_bucket_box.width);
-    env->SetIntField(bucketRect, bottomField, state->last_dumping_bucket_box.y + state->last_dumping_bucket_box.height);
+    env->SetIntField(bucketRect, leftField, state->ui_bucket_box.x);
+    env->SetIntField(bucketRect, topField, state->ui_bucket_box.y);
+    env->SetIntField(bucketRect, rightField, state->ui_bucket_box.x + state->ui_bucket_box.width);
+    env->SetIntField(bucketRect, bottomField, state->ui_bucket_box.y + state->ui_bucket_box.height);
 
     jobject truckRect = env->GetObjectField(resultObj, env->GetFieldID(resultClass, "truckPosition", "Landroid/graphics/Rect;"));
-    env->SetIntField(truckRect, leftField, state->current_truck_box.x);
-    env->SetIntField(truckRect, topField, state->current_truck_box.y);
-    env->SetIntField(truckRect, rightField, state->current_truck_box.x + state->current_truck_box.width);
-    env->SetIntField(truckRect, bottomField, state->current_truck_box.y + state->current_truck_box.height);
+    env->SetIntField(truckRect, leftField, state->ui_truck_box.x);
+    env->SetIntField(truckRect, topField, state->ui_truck_box.y);
+    env->SetIntField(truckRect, rightField, state->ui_truck_box.x + state->ui_truck_box.width);
+    env->SetIntField(truckRect, bottomField, state->ui_truck_box.y + state->ui_truck_box.height);
+
+    // ================== 全量检测框转码传给 Java ==================
+    if (!state->ui_all_detections.empty()) {
+        jintArray jAllDetections = env->NewIntArray(state->ui_all_detections.size() * 5);
+        if (jAllDetections != nullptr) {
+            std::vector<jint> boxData;
+            boxData.reserve(state->ui_all_detections.size() * 5);
+            for (const auto& box : state->ui_all_detections) {
+                boxData.push_back(box.xmin);
+                boxData.push_back(box.ymin);
+                boxData.push_back(box.xmax);
+                boxData.push_back(box.ymax);
+                boxData.push_back(box.class_id);
+            }
+            env->SetIntArrayRegion(jAllDetections, 0, boxData.size(), boxData.data());
+            env->SetObjectField(resultObj, env->GetFieldID(resultClass, "allDetections", "[I"), jAllDetections);
+            env->DeleteLocalRef(jAllDetections);
+        }
+    }
 
     jclass cbClass = env->GetObjectClass(callback);
     env->CallVoidMethod(callback, env->GetMethodID(cbClass, "onResult", "(Lcom/rosenshine/hhd/Excavator/ExcavatorResult;)V"), resultObj);
 
-    // 回调上报 Java 业务层 (追加 Float 参数)
     jmethodID onBucketMethod = env->GetMethodID(cbClass, "onBucketLoaded", "(Ljava/lang/String;IIJJF)V");
     for (const auto& ev : state->pending_bucket_events) {
         jstring jTicket = env->NewStringUTF(ev.ticket_id.c_str());
@@ -203,7 +229,6 @@ Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_detectNative(JNIEnv *env, jc
         env->DeleteLocalRef(jTicket);
     }
 
-    // 回调上报 Java 业务层 (追加 Int 参数)
     jmethodID onTruckMethod = env->GetMethodID(cbClass, "onTruckCompleted", "(Ljava/lang/String;IIJJI)V");
     for (const auto& ev : state->pending_truck_events) {
         jstring jTicket = env->NewStringUTF(ev.ticket_id.c_str());

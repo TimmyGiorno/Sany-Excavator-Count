@@ -45,11 +45,13 @@ class VideoTracker:
         self._last_dumping_box = None
         self._last_dumping_bucket_xyxy = None
         self.dumping_frame_count = 0
+        self.retry_count = 0  # 当前重试次数
+        self.max_retry_count = 5  # 最大重试次数
 
         # 稳定期相关
         self.stable_frames_remaining = 0
         self.current_truck_xyxy = None
-        self.stat_window_frames = 5
+        self.stat_window_frames = 10
         self.decline_threshold = 0.75
 
         # ================= 业务逻辑属性 =================
@@ -73,6 +75,7 @@ class VideoTracker:
         self.height = None
         self.fps = None
         self.total_frames = None
+
 
     def get_counts(self):
         return self.total_truck_count, self.current_truck_buckets, self.ticket_id
@@ -109,20 +112,10 @@ class VideoTracker:
         # 超时仅模拟数据推送，不清空车辆状态 =================
         if (self.current_truck_buckets > 0 or self.pending_buckets > 0) and (
                 now - self.last_action_time > self.timeout_sec):
-            # 把还没来得及确认的挂起铲数也算给这辆车
-            final_buckets = self.current_truck_buckets + self.pending_buckets
 
-            print(f"  [超时结束事件] 超过 {self.timeout_sec} 秒无装载，强制完结当前车辆。")
-            print(f"  --> 结算旧车 - 票号: {self.ticket_id}, 最终铲数: {final_buckets}")
-
-            # 模拟 C++ 里的 force_complete_truck(1) 逻辑
-            self.total_truck_count += 1
-            self.ticket_id = "WAITING"
-            self.current_truck_buckets = 0
-            self.pending_buckets = 0
-            self.last_avg_ratio = None
-            self.is_statting = False
-            self.stable_frames_remaining = 0
+            print(
+                f"  [超时业务事件] 超过 {self.timeout_sec} 秒无装载，向数据库推送进度 - 票号: {self.ticket_id}, "
+                f"已装: {self.current_truck_buckets} 铲, 挂起: {self.pending_buckets} 铲")
 
             self.last_action_time = now
 
@@ -208,7 +201,7 @@ class VideoTracker:
             self._last_dumping_box = dumping_boxes[0]['xyxy']
             self.dumping_frame_count += 1
             if not self.dumping_active:
-                if self.dumping_frame_count >= 3:
+                if self.dumping_frame_count >= 5:
                     self.dumping_active = True
 
             if self.stable_frames_remaining > 0 or self.is_statting:
@@ -238,16 +231,21 @@ class VideoTracker:
             self.stable_frames_remaining -= 1
 
             if self.stable_frames_remaining == 0:
+
+                # 如果没有 bucket 位置记录，尝试从当前帧获取
                 if self._last_dumping_bucket_xyxy is None and bucket_boxes:
                     best_bucket = max(bucket_boxes, key=lambda x: x['conf'])
                     self._last_dumping_bucket_xyxy = best_bucket['xyxy']
 
                 if self._last_dumping_bucket_xyxy is not None:
                     if truck_boxes:
+                        # 找到 truck，开始统计
                         self.is_statting = True
                         self.ratio_buffer = []
-                        self.stat_frames_remaining = 5
+                        self.stat_frames_remaining = 10
+                        self.retry_count = 0  # 重置重试计数
 
+                        # 找与 bucket 水平距离最近的 truck
                         min_distance = float('inf')
                         bucket_center_x = (self._last_dumping_bucket_xyxy[0] + self._last_dumping_bucket_xyxy[2]) / 2
 
@@ -258,11 +256,26 @@ class VideoTracker:
                                 min_distance = distance
                                 self.current_truck_xyxy = truck['xyxy']
 
+                        # 清理 bucket 位置记录
                         self._last_dumping_bucket_xyxy = None
                     else:
-                        self.stable_frames_remaining = 1
+                        # 没有 truck，重试
+                        self.retry_count += 1
+                        if self.retry_count < self.max_retry_count:
+                            self.stable_frames_remaining = 1
+                        else:
+                            # 达到最大重试次数，放弃本次统计
+                            self.retry_count = 0
+                            self._last_dumping_bucket_xyxy = None
                 else:
-                    self.stable_frames_remaining = 1
+                    # 没有 bucket 位置记录，且当前帧也没有 bucket
+                    self.retry_count += 1
+                    if self.retry_count < self.max_retry_count:
+                        self.stable_frames_remaining = 1
+                    else:
+                        # 达到最大重试次数，放弃本次统计
+                        self.retry_count = 0
+                        self._last_dumping_bucket_xyxy = None
 
         # 4. 统计 mine/truck 面积比值并结算挂起的铲数
         if self.is_statting and self.stat_frames_remaining > 0:
@@ -405,7 +418,7 @@ class VideoTracker:
 
 
 if __name__ == "__main__":
-    TEST_VIDEO = "./tmp_files/test_video_shift_fast_v.mp4"
+    TEST_VIDEO = "./tmp_files/bug_1.mp4"
     TRAINED_MODEL = "./tmp_files/best.pt"
     OUTPUT_VIDEO = "./tmp_files/test5.mp4"
 
