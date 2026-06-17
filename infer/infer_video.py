@@ -109,9 +109,21 @@ class VideoTracker:
         # 超时仅模拟数据推送，不清空车辆状态 =================
         if (self.current_truck_buckets > 0 or self.pending_buckets > 0) and (
                 now - self.last_action_time > self.timeout_sec):
-            print(
-                f"  [超时业务事件] 超过 {self.timeout_sec} 秒无装载，向数据库推送进度 - 票号: {self.ticket_id}, 已装: {self.current_truck_buckets} 铲, 挂起: {self.pending_buckets} 铲")
-            # 仅刷新计时器，防止每一帧都触发 DB 推送。车辆状态、票号等悉数保留。
+            # 把还没来得及确认的挂起铲数也算给这辆车
+            final_buckets = self.current_truck_buckets + self.pending_buckets
+
+            print(f"  [超时结束事件] 超过 {self.timeout_sec} 秒无装载，强制完结当前车辆。")
+            print(f"  --> 结算旧车 - 票号: {self.ticket_id}, 最终铲数: {final_buckets}")
+
+            # 模拟 C++ 里的 force_complete_truck(1) 逻辑
+            self.total_truck_count += 1
+            self.ticket_id = "WAITING"
+            self.current_truck_buckets = 0
+            self.pending_buckets = 0
+            self.last_avg_ratio = None
+            self.is_statting = False
+            self.stable_frames_remaining = 0
+
             self.last_action_time = now
 
         if yolo_results.boxes is None:
@@ -393,7 +405,7 @@ class VideoTracker:
 
 
 if __name__ == "__main__":
-    TEST_VIDEO = "./tmp_files/test_video_shift_fast.mp4"
+    TEST_VIDEO = "./tmp_files/test_video_shift_fast_v.mp4"
     TRAINED_MODEL = "./tmp_files/best.pt"
     OUTPUT_VIDEO = "./tmp_files/test5.mp4"
 
