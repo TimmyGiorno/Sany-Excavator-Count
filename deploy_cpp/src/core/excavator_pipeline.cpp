@@ -35,6 +35,7 @@ struct BucketEvent {
     int current_bucket_count;
     long long dump_start_time;
     long long dump_end_time;
+    float last_mineral_ratio; // 新增：单铲当时的矿石比例，用于持久化恢复
 };
 
 struct TruckEvent {
@@ -43,10 +44,7 @@ struct TruckEvent {
     int total_bucket_count;
     long long load_start_time;
     long long load_end_time;
-};
-
-struct TimeoutEvent {
-    std::string ticket_id;
+    int completed_type; // 新增：0表示车辆开走结束，1表示超时结束
 };
 
 // 挂起缓冲的临时结构
@@ -86,6 +84,8 @@ struct PipelineState {
     cv::Rect current_truck_box = cv::Rect(0,0,0,0);
     cv::Rect last_dumping_bucket_box = cv::Rect(0,0,0,0);
 
+
+
     // 真实面积统计判定字段
     int stable_frames_remaining = 0;
     bool is_statting = false;
@@ -93,10 +93,9 @@ struct PipelineState {
     std::vector<float> ratio_buffer;
     float last_avg_ratio = -1.0f;
 
-    // 服务器事件队列
+    // 服务器事件队列 (移除原有的超时队列)
     std::vector<BucketEvent> pending_bucket_events;
     std::vector<TruckEvent> pending_truck_events;
-    std::vector<TimeoutEvent> pending_timeout_events;
 };
 
 class ExcavatorPipeline {
@@ -138,16 +137,16 @@ private:
         return !(b1.x + b1.width < b2.x || b2.x + b2.width < b1.x);
     }
 
-    // 彻底结算旧车（触发装车完成事件数据上传）
-    void force_complete_truck() {
+    // 彻底结算旧车，新增 completed_type 参数区分类型
+    void force_complete_truck(int completed_type = 0) {
         if (state.is_truck_active) {
             TruckEvent te;
             te.ticket_id = state.ticket_id;
             te.total_truck_count = state.total_truck_count;
             te.total_bucket_count = state.current_truck_buckets;
             te.load_start_time = state.truck_load_start_time;
+            te.completed_type = completed_type; // 记录完结类型
 
-            // 【修复 2】：绝对兜底时间。万一中途没有任何卸料就切车，使用最后活跃时间填补 0 漏洞
             long long end_time = state.truck_load_end_time > 0 ? state.truck_load_end_time : state.last_action_time;
             if (end_time <= 0) end_time = get_current_time_ms();
             te.load_end_time = end_time;
@@ -166,7 +165,7 @@ private:
     void commit_pending_buckets() {
         for (const auto& pb : state.pending_queue) {
             state.current_truck_buckets++;
-            state.truck_load_end_time = pb.dump_end_time; // 正常工作时，此处会刷新 load_end_time
+            state.truck_load_end_time = pb.dump_end_time;
 
             BucketEvent be;
             be.ticket_id = state.ticket_id;
@@ -174,15 +173,17 @@ private:
             be.current_bucket_count = state.current_truck_buckets;
             be.dump_start_time = pb.dump_start_time;
             be.dump_end_time = pb.dump_end_time;
+            be.last_mineral_ratio = state.last_avg_ratio; // 新增：将当前断崖比例透传给安卓端
+
             state.pending_bucket_events.push_back(be);
         }
         state.pending_buckets = 0;
         state.pending_queue.clear();
     }
 
-    // 发生切车时的快速更迭
+    // 发生切车时的快速更迭 (此时一定是正常开走 completed_type = 0)
     void cut_truck(long long now) {
-        force_complete_truck();
+        force_complete_truck(0);
         state.is_truck_active = true;
         state.total_truck_count++;
         state.ticket_id = generate_ticket_id();
@@ -218,7 +219,6 @@ public:
             state.is_truck_active = true;
             long long now = get_current_time_ms();
             state.truck_load_start_time = now;
-            // 【修复 1】：强行恢复进来的车，兜底全部时间属性和总车数属性
             state.truck_load_end_time = now;
             state.last_dump_end_time = now;
             state.last_action_time = now;
@@ -232,7 +232,6 @@ public:
     void clear_events() {
         state.pending_bucket_events.clear();
         state.pending_truck_events.clear();
-        state.pending_timeout_events.clear();
     }
 
     PipelineState& getState() { return state; }
@@ -241,13 +240,11 @@ public:
         long long now = get_current_time_ms();
         state.frames_since_bucket_empty++;
 
-        // A. 物理时间超时校验 (一车仅推送一次，不清空车号)
+        // A. 物理时间超时校验 -> 改为直接强制结束车辆 (completed_type = 1)
         if ((state.current_truck_buckets > 0 || state.pending_buckets > 0) && (now - state.last_action_time > config.timeout_ms)) {
             if (!state.has_pushed_timeout) {
                 state.has_pushed_timeout = true;
-                TimeoutEvent to_ev;
-                to_ev.ticket_id = state.ticket_id;
-                state.pending_timeout_events.push_back(to_ev);
+                force_complete_truck(1); // 触发超时切车，直接结算并清空当前车
             }
         }
 
