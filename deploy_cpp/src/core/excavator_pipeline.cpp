@@ -69,7 +69,8 @@ struct PipelineState {
     bool dumping_active = false;
     int dumping_frame_count = 0;
 
-    // 【新增】重试机制相关变量
+    int dumping_lost_frames = 0;
+
     int retry_count = 0;
     int max_retry_count = 5;
 
@@ -153,11 +154,15 @@ private:
 
             state.pending_truck_events.push_back(te);
 
-            state.is_truck_active = false;
-            state.ticket_id = "WAITING";
-            state.current_truck_buckets = 0;
-            state.has_pushed_timeout = false;
-            state.last_avg_ratio = -1.0f;
+            // 如果是挂机超时 (1)，只推送事件，绝对不清理状态机。
+            // 只有当基于视觉判定这辆车真开走了 (0)，才清空状态准备迎接新车。
+            if (completed_type == 0) {
+                state.is_truck_active = false;
+                state.ticket_id = "WAITING";
+                state.current_truck_buckets = 0;
+                state.has_pushed_timeout = false;
+                state.last_avg_ratio = -1.0f;
+            }
         }
     }
 
@@ -172,7 +177,9 @@ private:
             be.current_bucket_count = state.current_truck_buckets;
             be.dump_start_time = pb.dump_start_time;
             be.dump_end_time = pb.dump_end_time;
-            be.last_mineral_ratio = state.last_avg_ratio;
+
+            // 只要是没算出来的负数，统统默认为 0.0f
+            be.last_mineral_ratio = (state.last_avg_ratio < 0) ? 0.0f : state.last_avg_ratio;
 
             state.pending_bucket_events.push_back(be);
         }
@@ -180,7 +187,7 @@ private:
         state.pending_queue.clear();
     }
 
-    void cut_truck(long long now) {
+    void cut_truck(long long now, float new_ratio = 0.0f) {
         force_complete_truck(0);
         state.is_truck_active = true;
         state.total_truck_count++;
@@ -194,6 +201,10 @@ private:
         } else {
             state.truck_load_start_time = now;
         }
+
+        // 赶在 commit_pending_buckets 前，把刚计算好的比例赋给新卡车，防止它用 -1 提交
+        state.last_avg_ratio = new_ratio;
+
         commit_pending_buckets();
     }
 
@@ -201,7 +212,7 @@ public:
     ExcavatorPipeline(const void* yolo_data, const int yolo_size) {
         if (yolo_data && yolo_size > 0) {
             rknn_init(&rknn_yolo, const_cast<void *>(yolo_data), yolo_size, 0, nullptr);
-            state.last_action_time = get_current_time_ms();
+            state.last_action_time = 0;
         }
     }
 
@@ -219,7 +230,7 @@ public:
             state.truck_load_start_time = now;
             state.truck_load_end_time = now;
             state.last_dump_end_time = now;
-            state.last_action_time = now;
+            state.last_action_time = 0;
 
             if (state.total_truck_count == 0) {
                 state.total_truck_count = 1;
@@ -238,7 +249,7 @@ public:
         long long now = get_current_time_ms();
         state.frames_since_bucket_empty++;
 
-        if ((state.current_truck_buckets > 0 || state.pending_buckets > 0) && (now - state.last_action_time > config.timeout_ms)) {
+        if (state.last_action_time > 0 && (state.current_truck_buckets > 0 || state.pending_buckets > 0) && (now - state.last_action_time > config.timeout_ms)) {
             if (!state.has_pushed_timeout) {
                 state.has_pushed_timeout = true;
                 force_complete_truck(1);
@@ -351,7 +362,9 @@ public:
             cv::Rect bb_rect(best_bucket.xmin, best_bucket.ymin, best_bucket.xmax - best_bucket.xmin, best_bucket.ymax - best_bucket.ymin);
 
             if (best_bucket.class_id == 1) {
-                if (state.pending_buckets > 0) commit_pending_buckets();
+                if (state.pending_buckets > 0 && !state.is_statting && !state.dumping_active) {
+                    commit_pending_buckets();
+                }
                 if (!state.bucket_full) {
                     bool overlap = false;
                     for (auto& t : truck_boxes) {
@@ -385,6 +398,13 @@ public:
                         pb.dump_start_time = state.current_dump_start_time > 0 ? state.current_dump_start_time : now;
                         pb.dump_end_time = now;
                         state.pending_queue.push_back(pb);
+
+                        // 防止下一铲漏检 dumping 时，盗用这一铲的时间
+                        state.current_dump_start_time = 0;
+
+                        if (!state.dumping_active && state.stable_frames_remaining == 0 && !state.is_statting) {
+                            state.stable_frames_remaining = 1;
+                        }
                     } else {
                         state.bucket_full = false;
                     }
@@ -397,11 +417,11 @@ public:
 
         if (has_dumping) {
             state.dumping_frame_count++;
+            state.dumping_lost_frames = 0;
 
             if (state.dumping_frame_count == 1) state.current_dump_start_time = now;
 
-            // 【修改】阈值改为 5
-            if (!state.dumping_active && state.dumping_frame_count >= 5) {
+            if (!state.dumping_active && state.dumping_frame_count >= 2) {
                 state.dumping_active = true;
             }
 
@@ -414,22 +434,31 @@ public:
                 state.last_dumping_bucket_box = cv::Rect(0,0,0,0);
             }
         } else {
-            state.dumping_frame_count = 0;
             if (state.dumping_active) {
-                state.dumping_active = false;
-                state.stable_frames_remaining = 1;
+                state.dumping_lost_frames++;
 
-                if (!bucket_boxes.empty()) {
-                    auto b = bucket_boxes[0];
-                    for (const auto& bx : bucket_boxes) if (bx.score > b.score) b = bx;
-                    state.last_dumping_bucket_box = cv::Rect(b.xmin, b.ymin, b.xmax - b.xmin, b.ymax - b.ymin);
-                } else {
-                    state.last_dumping_bucket_box = cv::Rect(0,0,0,0);
+                if (state.dumping_lost_frames > 15) {
+                    state.dumping_active = false;
+                    state.dumping_frame_count = 0;
+                    state.dumping_lost_frames = 0;
+
+                    state.stable_frames_remaining = 1;
+
+                    if (!bucket_boxes.empty()) {
+                        auto b = bucket_boxes[0];
+                        for (const auto& bx : bucket_boxes) if (bx.score > b.score) b = bx;
+                        state.last_dumping_bucket_box = cv::Rect(b.xmin, b.ymin, b.xmax - b.xmin, b.ymax - b.ymin);
+                    } else {
+                        state.last_dumping_bucket_box = cv::Rect(0,0,0,0);
+                    }
                 }
+            } else {
+                state.dumping_frame_count = 0;
+                state.dumping_lost_frames = 0;
             }
         }
 
-        // === D. 寻找用于计算比值的卡车 (带重试机制) ===
+        // === D. 寻找用于计算比值的卡车 ===
         if (state.stable_frames_remaining > 0) {
             state.stable_frames_remaining--;
             if (state.stable_frames_remaining == 0) {
@@ -444,8 +473,8 @@ public:
                     if (!truck_boxes.empty()) {
                         state.is_statting = true;
                         state.ratio_buffer.clear();
-                        state.stat_frames_remaining = 10; // 【修改】采样窗口改为 10 帧
-                        state.retry_count = 0; // 重置重试
+                        state.stat_frames_remaining = 15;
+                        state.retry_count = 0;
 
                         float min_dist = 1e9;
                         float b_cx = state.last_dumping_bucket_box.x + state.last_dumping_bucket_box.width / 2.0f;
@@ -460,23 +489,29 @@ public:
                         }
                         state.last_dumping_bucket_box = cv::Rect(0,0,0,0);
                     } else {
-                        // 【新增】找不到卡车，重试
                         state.retry_count++;
                         if (state.retry_count < state.max_retry_count) {
                             state.stable_frames_remaining = 1;
                         } else {
+                            // 找车 5 次彻底失败，不要挂机，强行转 0 结算，防止遗留的 -1 泄露
                             state.retry_count = 0;
                             state.last_dumping_bucket_box = cv::Rect(0,0,0,0);
+
+                            if (state.last_avg_ratio < 0) state.last_avg_ratio = 0.0f;
+                            if (state.pending_buckets > 0) commit_pending_buckets();
                         }
                     }
                 } else {
-                    // 【新增】找不到铲斗，重试
                     state.retry_count++;
                     if (state.retry_count < state.max_retry_count) {
                         state.stable_frames_remaining = 1;
                     } else {
+                        // 找车 5 次彻底失败，不要挂机，强行转 0 结算，防止遗留的 -1 泄露
                         state.retry_count = 0;
                         state.last_dumping_bucket_box = cv::Rect(0,0,0,0);
+
+                        if (state.last_avg_ratio < 0) state.last_avg_ratio = 0.0f;
+                        if (state.pending_buckets > 0) commit_pending_buckets();
                     }
                 }
             }
@@ -521,31 +556,45 @@ public:
 
             if (state.stat_frames_remaining == 0) {
                 state.is_statting = false;
-                float sum = 0; for(float r: state.ratio_buffer) sum += r;
-                float avg_ratio = state.ratio_buffer.empty() ? 0.0f : (sum / state.ratio_buffer.size());
 
+                // 抗闪烁滤波，只计算检测到矿物的有效帧
+                float sum = 0;
+                int valid_count = 0;
+                for (float r : state.ratio_buffer) {
+                    if (r > 0.0f) {  // 直接过滤掉漏检导致的 0
+                        sum += r;
+                        valid_count++;
+                    }
+                }
+
+                // 只要这 15 帧内哪怕只有 1 帧检出了矿，就不会被误判为 0
+                float avg_ratio = (valid_count > 0) ? (sum / valid_count) : 0.0f;
+
+                // 下方保留你原有的结算逻辑
                 if (state.last_avg_ratio < 0) {
                     state.last_avg_ratio = avg_ratio;
                     if (state.pending_buckets > 0) commit_pending_buckets();
                 } else {
                     if (state.last_avg_ratio == 0.0f && avg_ratio == 0.0f) {
+                        state.last_avg_ratio = avg_ratio;
                         if (state.pending_buckets > 0) commit_pending_buckets();
                     } else {
                         float decline = state.last_avg_ratio > 0 ? (state.last_avg_ratio - avg_ratio) / state.last_avg_ratio : 0.0f;
                         if (avg_ratio == 0.0f || decline >= config.decline_thresh) {
-                            cut_truck(now);
+                            cut_truck(now, avg_ratio);
                         } else {
+                            state.last_avg_ratio = avg_ratio;
                             if (state.pending_buckets > 0) commit_pending_buckets();
                         }
                     }
-                    state.last_avg_ratio = avg_ratio;
                 }
                 state.current_truck_box = cv::Rect(0,0,0,0);
             }
         }
 
         // === F. 快速强行合并兜底 ===
-        if (state.pending_buckets > 0 && state.frames_since_bucket_empty > 15) {
+        if (state.pending_buckets > 0 && state.frames_since_bucket_empty > 60 && !state.is_statting && !state.dumping_active) {
+            if (state.last_avg_ratio < 0) state.last_avg_ratio = 0.0f;
             commit_pending_buckets();
         }
 

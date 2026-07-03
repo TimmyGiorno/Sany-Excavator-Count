@@ -103,7 +103,7 @@ Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_detectNative(JNIEnv *env, jc
 
     jbyte* yuv_buf = env->GetByteArrayElements(yuvData, NULL);
     cv::Mat yuv(height + height / 2, width, CV_8UC1, (unsigned char*)yuv_buf);
-    cv::Mat bgr; cv::cvtColor(yuv, bgr, cv::COLOR_YUV2BGR_NV21);
+    cv::Mat bgr; cv::cvtColor(yuv, bgr, cv::COLOR_YUV2BGR_NV12);
     env->ReleaseByteArrayElements(yuvData, yuv_buf, JNI_ABORT);
 
     void* handle = reinterpret_cast<void*>(handlePtr);
@@ -133,7 +133,8 @@ Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_detectNative(JNIEnv *env, jc
         bool dumping_active;
         int dumping_frame_count;
 
-        // 【新增】严格对齐 C++ 端的新变量
+        int dumping_lost_frames;
+
         int retry_count;
         int max_retry_count;
 
@@ -171,7 +172,7 @@ Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_detectNative(JNIEnv *env, jc
     jobject resultObj = env->NewObject(resultClass, env->GetMethodID(resultClass, "<init>", "()V"));
 
     env->SetIntField(resultObj, env->GetFieldID(resultClass, "currentShovelCount", "I"), state->current_truck_buckets);
-    env->SetBooleanField(resultObj, env->GetFieldID(resultClass, "isLoading", "Z"), state->dumping_active);
+    env->SetBooleanField(resultObj, env->GetFieldID(resultClass, "isDumping", "Z"), state->dumping_active);
     env->SetBooleanField(resultObj, env->GetFieldID(resultClass, "isComplete", "Z"), !state->pending_truck_events.empty());
     env->SetBooleanField(resultObj, env->GetFieldID(resultClass, "isStartLoading", "Z"), state->current_truck_buckets >= 1);
 

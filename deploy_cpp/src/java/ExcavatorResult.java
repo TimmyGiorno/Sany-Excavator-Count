@@ -7,13 +7,14 @@ public class ExcavatorResult {
     private boolean isStartLoading;
     private Rect bucketPosition;
     private int bucketType;
-    private boolean isLoading;
+
+    private boolean isDumping;
+
     private Rect truckPosition;
     private int currentShovelCount;
     private boolean isComplete;
 
     // ================== 全量检测框数组 ==================
-    // 格式：[left1, top1, right1, bottom1, classId1, left2, top2, ...]
     // 0 空斗 1 满斗 2 卡车 3 载矿 4 卸矿 5 矿
     private int[] allDetections;
 
@@ -31,7 +32,7 @@ public class ExcavatorResult {
     public void setTicketId(String ticketId) { this.ticketId = ticketId; }
 
     public boolean isStartLoading() { return isStartLoading; }
-    public void setStartLoading(boolean startLoading) { isStartLoading = startLoading; }
+    public void setStartLoading(boolean startLoading) { this.isStartLoading = startLoading; }
 
     public Rect getBucketPosition() { return bucketPosition; }
     public void setBucketPosition(Rect bucketPosition) { this.bucketPosition = bucketPosition; }
@@ -39,8 +40,8 @@ public class ExcavatorResult {
     public int getBucketType() { return bucketType; }
     public void setBucketType(int bucketType) { this.bucketType = bucketType; }
 
-    public boolean isLoading() { return isLoading; }
-    public void setLoading(boolean loading) { this.isLoading = loading; }
+    public boolean isDumping() { return isDumping; }
+    public void setDumping(boolean dumping) { this.isDumping = dumping; }
 
     public Rect getTruckPosition() { return truckPosition; }
     public void setTruckPosition(Rect truckPosition) { this.truckPosition = truckPosition; }

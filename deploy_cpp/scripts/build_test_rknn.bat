@@ -36,46 +36,57 @@ adb push --sync %NDK_PATH%\toolchains\llvm\prebuilt\windows-x86_64\sysroot\usr\l
 adb push --sync ./3rdparty/opencv/opencv-4.13.0-android-sdk/OpenCV-android-sdk/sdk/native/libs/arm64-v8a/libopencv_java4.so /data/local/tmp/
 adb push --sync ./3rdparty/rknn/android/arm64-v8a/librknnrt.so /data/local/tmp/
 adb push --sync ./tmp_files/best_320.rknn /data/local/tmp/
-adb push --sync ./tmp_files/test_video_shift_fast.mp4 /data/local/tmp/
+adb push --sync ./tmp_files/test_video.mp4 /data/local/tmp/
 
 echo.
 echo =======================================================
 echo [3/3] 正在安卓设备上运行分流测试...
 echo =======================================================
-:: 初始化并清空板端渲染图输出目录
+:: 初始化并清空板端渲染图输出目录（包含模式 1 和模式 4 的目录）
 adb shell "mkdir -p /data/local/tmp/out_frames && rm -f /data/local/tmp/out_frames/*.jpg"
+adb shell "mkdir -p /data/local/tmp/out_low_fps && rm -f /data/local/tmp/out_low_fps/*.jpg"
+
+@REM echo.
+@REM echo -------------------------------------------------------
+@REM echo ▶ 执行测试 1：常规视频流推理 (每100帧输出性能耗时)
+@REM echo -------------------------------------------------------
+@REM :: 常规测试传入 3 个参数：<yolo模型> <视频> <test_mode=1>
+@REM adb shell "export LD_LIBRARY_PATH=/data/local/tmp:$LD_LIBRARY_PATH && /data/local/tmp/test_excavator /data/local/tmp/best_320.rknn /data/local/tmp/test_video_shift_fast.mp4 1 /data/local/tmp/out_frames/frame_%%04d.jpg"
+
+@REM echo.
+@REM echo -------------------------------------------------------
+@REM echo ▶ 执行测试 2：纯断电恢复状态流测试
+@REM echo -------------------------------------------------------
+@REM :: 一键测试开机直接从断电中恢复的场景 (对应 test_mode=2)
+@REM adb shell "export LD_LIBRARY_PATH=/data/local/tmp:$LD_LIBRARY_PATH && /data/local/tmp/test_excavator /data/local/tmp/best_320.rknn /data/local/tmp/test_video_shift_fast.mp4 2"
+@REM
+@REM echo.
+@REM echo -------------------------------------------------------
+@REM echo ▶ 执行测试 3：纯挂机/业务超时预警测试 (触发单次推送)
+@REM echo -------------------------------------------------------
+@REM :: 一键测试正常作业中突然停工卡死12秒的超时上报场景 (对应 test_mode=3)
+@REM adb shell "export LD_LIBRARY_PATH=/data/local/tmp:$LD_LIBRARY_PATH && /data/local/tmp/test_excavator /data/local/tmp/best_320.rknn /data/local/tmp/test_video_shift_fast.mp4 3"
 
 echo.
 echo -------------------------------------------------------
-echo ▶ 执行测试 1：常规视频流推理 (每100帧输出性能耗时)
+echo ▶ 执行测试 4：模拟边缘端低帧率 (10 FPS 抽帧大步长瞬移测试)
 echo -------------------------------------------------------
-:: 常规测试传入 3 个参数：<yolo模型> <视频> <test_mode=1>
-adb shell "export LD_LIBRARY_PATH=/data/local/tmp:$LD_LIBRARY_PATH && /data/local/tmp/test_excavator /data/local/tmp/best_320.rknn /data/local/tmp/test_video_shift_fast.mp4 1 /data/local/tmp/out_frames/frame_%%04d.jpg"
-
-echo.
-echo -------------------------------------------------------
-echo ▶ 执行测试 2：纯断电恢复状态流测试
-echo -------------------------------------------------------
-:: 一键测试开机直接从断电中恢复的场景 (对应 test_mode=2)
-adb shell "export LD_LIBRARY_PATH=/data/local/tmp:$LD_LIBRARY_PATH && /data/local/tmp/test_excavator /data/local/tmp/best_320.rknn /data/local/tmp/test_video_shift_fast.mp4 2"
-
-echo.
-echo -------------------------------------------------------
-echo ▶ 执行测试 3：纯挂机/业务超时预警测试 (触发单次推送)
-echo -------------------------------------------------------
-:: 一键测试正常作业中突然停工卡死12秒的超时上报场景 (对应 test_mode=3)
-adb shell "export LD_LIBRARY_PATH=/data/local/tmp:$LD_LIBRARY_PATH && /data/local/tmp/test_excavator /data/local/tmp/best_320.rknn /data/local/tmp/test_video_shift_fast.mp4 3"
+:: 抽帧压力测试传入参数：<yolo模型> <视频> <test_mode=4>
+adb shell "export LD_LIBRARY_PATH=/data/local/tmp:$LD_LIBRARY_PATH && /data/local/tmp/test_excavator /data/local/tmp/best_320.rknn /data/local/tmp/shift_cut.mp4 4 /data/local/tmp/out_low_fps/low_fps_%%04d.jpg"
 
 echo.
 echo =======================================================
 echo 正在从开发板拉取渲染图片...
 echo =======================================================
+:: 同时把常规图和低帧率抽帧图都拉回到本地的 ./tmp_files/ 目录下
 adb pull /data/local/tmp/out_frames/ ./tmp_files/
+adb pull /data/local/tmp/out_low_fps/ ./tmp_files/
 
 echo.
 echo ✅ 全部流程处理完毕！
-echo    1. 检查控制台日志：模式 1 看性能FPS、模式 2 看断电恢复、模式 3 看超时预警 (JSON格式)。
-echo    2. 检查电脑端 ./tmp_files/out_frames 查看框选渲染图。
+echo    1. 检查控制台日志：模式 1 看常规性能、模式 2 看断电恢复、模式 3 看超时预警、模式 4 看低帧率大步长下的状态转换。
+echo    2. 检查电脑端 ./tmp_files/out_frames 查看常规画框渲染图。
+echo    3. 检查电脑端 ./tmp_files/out_low_fps 查看低 FPS 幻灯片抽帧画框效果。
 echo =======================================================
 
 endlocal

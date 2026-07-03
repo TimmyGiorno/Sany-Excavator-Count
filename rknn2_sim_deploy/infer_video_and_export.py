@@ -6,10 +6,10 @@ from typing import List, Tuple, Dict, Any
 
 # ================= 配置区 =================
 MODEL_CONFIG = {
-    'YOLO_ONNX_PATH': './tmp_files/best_320.onnx',
-    'YOLO_OUTPUT_RKNN': './tmp_files/best_320.rknn',
+    'YOLO_ONNX_PATH': './tmp_files/best_640.onnx',
+    'YOLO_OUTPUT_RKNN': './tmp_files/rk3576_best_640.rknn',
     'YOLO_DATASET_PATH': './dataset_yolo.txt',
-    'INPUT_SIZE': (320, 320),
+    'INPUT_SIZE': (640, 640),
     'CLASSES': ['bucket-empty', 'bucket-full', 'truck', 'loading', 'dumping', 'mine'],
     'REG_MAX': 16,
 
@@ -157,7 +157,7 @@ def run_inference():
 
     try:
         print("--> 正在编译量化组件（YOLO 目标检测引擎）...")
-        rknn_yolo.config(mean_values=[[0, 0, 0]], std_values=[[255, 255, 255]], target_platform='rk3568',
+        rknn_yolo.config(mean_values=[[0, 0, 0]], std_values=[[255, 255, 255]], target_platform='rk3576',
                          quant_img_RGB2BGR=True)
         if rknn_yolo.load_onnx(model=MODEL_CONFIG['YOLO_ONNX_PATH']) != 0: raise RuntimeError("加载 YOLO 失败")
         if rknn_yolo.build(do_quantization=True, dataset=MODEL_CONFIG['YOLO_DATASET_PATH']) != 0: raise RuntimeError(
