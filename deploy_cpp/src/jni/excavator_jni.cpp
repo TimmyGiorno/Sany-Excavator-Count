@@ -128,6 +128,7 @@ Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_detectNative(JNIEnv *env, jc
         std::vector<PendingBucket> pending_queue;
 
         bool has_pushed_timeout;
+        int timeout_bucket_count;
 
         bool bucket_full;
         bool dumping_active;
@@ -145,6 +146,9 @@ Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_detectNative(JNIEnv *env, jc
         long long last_action_time;
 
         bool is_truck_active;
+
+        bool pending_bucket_secured;
+        long long secured_dump_start_time;
 
         cv::Rect last_dumping_box;
         cv::Rect current_truck_box;
@@ -223,17 +227,19 @@ Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_detectNative(JNIEnv *env, jc
     jclass cbClass = env->GetObjectClass(callback);
     env->CallVoidMethod(callback, env->GetMethodID(cbClass, "onResult", "(Lcom/rosenshine/hhd/Excavator/ExcavatorResult;)V"), resultObj);
 
-    jmethodID onBucketMethod = env->GetMethodID(cbClass, "onBucketLoaded", "(Ljava/lang/String;IIJJF)V");
-    for (const auto& ev : state->pending_bucket_events) {
-        jstring jTicket = env->NewStringUTF(ev.ticket_id.c_str());
-        env->CallVoidMethod(callback, onBucketMethod, jTicket, ev.total_truck_count, ev.current_bucket_count, (jlong)ev.dump_start_time, (jlong)ev.dump_end_time, (jfloat)ev.last_mineral_ratio);
-        env->DeleteLocalRef(jTicket);
-    }
-
+    // 1. 先通知 Java：旧车已经开走 (或触发了超时)
     jmethodID onTruckMethod = env->GetMethodID(cbClass, "onTruckCompleted", "(Ljava/lang/String;IIJJI)V");
     for (const auto& ev : state->pending_truck_events) {
         jstring jTicket = env->NewStringUTF(ev.ticket_id.c_str());
         env->CallVoidMethod(callback, onTruckMethod, jTicket, ev.total_truck_count, ev.total_bucket_count, (jlong)ev.load_start_time, (jlong)ev.load_end_time, (jint)ev.completed_type);
+        env->DeleteLocalRef(jTicket);
+    }
+
+    // 2. 再通知 Java：新车的第一铲倒下来了 (保证 Java 的车次已被推高)
+    jmethodID onBucketMethod = env->GetMethodID(cbClass, "onBucketLoaded", "(Ljava/lang/String;IIJJF)V");
+    for (const auto& ev : state->pending_bucket_events) {
+        jstring jTicket = env->NewStringUTF(ev.ticket_id.c_str());
+        env->CallVoidMethod(callback, onBucketMethod, jTicket, ev.total_truck_count, ev.current_bucket_count, (jlong)ev.dump_start_time, (jlong)ev.dump_end_time, (jfloat)ev.last_mineral_ratio);
         env->DeleteLocalRef(jTicket);
     }
 
@@ -260,10 +266,10 @@ Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_releaseNative(JNIEnv *env, j
 }
 
 JNIEXPORT void JNICALL
-Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_restoreStateNative(JNIEnv *env, jclass clazz, jlong handlePtr, jstring ticketId, jint bucketCount, jfloat lastMineralRatio) {
+Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_restoreStateNative(JNIEnv *env, jclass clazz, jlong handlePtr, jstring ticketId, jint bucketCount, jfloat lastMineralRatio, jint totalTruckCount) { // <-- 增加 jint totalTruckCount
     if (handlePtr == 0) return;
     const char* t_id = env->GetStringUTFChars(ticketId, 0);
-    restore_pipeline_state(reinterpret_cast<void*>(handlePtr), t_id, bucketCount, lastMineralRatio);
+    restore_pipeline_state(reinterpret_cast<void*>(handlePtr), t_id, bucketCount, lastMineralRatio, totalTruckCount);
     env->ReleaseStringUTFChars(ticketId, t_id);
 }
 

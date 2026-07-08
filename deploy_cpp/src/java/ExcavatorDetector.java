@@ -23,11 +23,10 @@ public class ExcavatorDetector {
     private static native void updateConfigNative(long handle, float confThresh, float iouThresh);
     private static native void releaseNative(long handle);
 
-    private static native void restoreStateNative(long handle, String ticketId, int bucketCount, float lastMineralRatio);
+    private static native void restoreStateNative(long handle, String ticketId, int bucketCount, float lastMineralRatio, int totalTruckCount);
     private static native void setTimeoutNative(long handle, long ms);
 
     // ================= 开放给客户端的接口 =================
-
     public static void setTimeout(long ms) {
         if (nativeHandle != 0) setTimeoutNative(nativeHandle, ms);
     }
@@ -44,9 +43,9 @@ public class ExcavatorDetector {
         detectNative(nativeHandle, yuvData, width, height, clientCallback);
     }
 
-    public static void restoreState(String ticketId, int lastBuckets, float lastMineralRatio) {
+    public static void restoreState(String ticketId, int lastBuckets, float lastMineralRatio, int totalTruckCount) {
         if (nativeHandle != 0) {
-            restoreStateNative(nativeHandle, ticketId, lastBuckets, lastMineralRatio);
+            restoreStateNative(nativeHandle, ticketId, lastBuckets, lastMineralRatio, totalTruckCount);
         }
     }
 

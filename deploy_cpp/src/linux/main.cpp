@@ -49,6 +49,7 @@ struct PipelineState {
     std::vector<PendingBucket> pending_queue;
 
     bool has_pushed_timeout;
+    int timeout_bucket_count;
 
     bool bucket_full;
     bool dumping_active;
@@ -66,6 +67,9 @@ struct PipelineState {
     long long last_action_time;
 
     bool is_truck_active;
+
+    bool pending_bucket_secured;
+    long long secured_dump_start_time;
 
     cv::Rect last_dumping_box;
     cv::Rect current_truck_box;
@@ -108,15 +112,6 @@ std::vector<unsigned char> load_file_to_memory(const char* path) {
 void consume_and_print_events(void* pipeline, PipelineState* state) {
     if (state->pending_bucket_events.empty() && state->pending_truck_events.empty()) return;
 
-    for (const auto& ev : state->pending_bucket_events) {
-        std::cout << "{\"类型\": \"铲斗事件\", \"票号\": \"" << ev.ticket_id
-                  << "\", \"总装车数\": " << ev.total_truck_count
-                  << ", \"当前铲斗数\": " << ev.current_bucket_count
-                  << ", \"矿物占比\": " << ev.last_mineral_ratio
-                  << ", \"卸料开始时间\": " << ev.dump_start_time
-                  << ", \"卸料结束时间\": " << ev.dump_end_time << "}" << std::endl;
-    }
-
     for (const auto& ev : state->pending_truck_events) {
         std::string c_type = (ev.completed_type == 1) ? "超时强制结束" : "正常开走完结";
         std::cout << "{\"类型\": \"车辆完结事件\", \"完结方式\": \"" << c_type
@@ -125,6 +120,15 @@ void consume_and_print_events(void* pipeline, PipelineState* state) {
                   << ", \"总共铲斗数\": " << ev.total_bucket_count
                   << ", \"装车开始时间\": " << ev.load_start_time
                   << ", \"装车结束时间\": " << ev.load_end_time << "}" << std::endl;
+    }
+
+    for (const auto& ev : state->pending_bucket_events) {
+        std::cout << "{\"类型\": \"铲斗事件\", \"票号\": \"" << ev.ticket_id
+                  << "\", \"总装车数\": " << ev.total_truck_count
+                  << ", \"当前铲斗数\": " << ev.current_bucket_count
+                  << ", \"矿物占比\": " << ev.last_mineral_ratio
+                  << ", \"卸料开始时间\": " << ev.dump_start_time
+                  << ", \"卸料结束时间\": " << ev.dump_end_time << "}" << std::endl;
     }
 
     clear_pipeline_events(pipeline);
@@ -200,8 +204,8 @@ void test_real_video(void* pipeline, cv::VideoCapture& cap, const char* out_patt
 void test_restore_only(void* pipeline, cv::VideoCapture& cap) {
     std::cout << "▶ 开始执行【模式 2: 纯断电恢复测试】..." << std::endl;
 
-    std::cout << ">>> [动作] 模拟断电重启，灌入数据库状态：票号 TKT_RESTORED_888, 已装 5 铲, 矿物占比 0.65" << std::endl;
-    restore_pipeline_state(pipeline, "TKT_RESTORED_888", 5, 0.65f);
+    std::cout << ">>> [动作] 模拟断电重启，灌入状态：票号 TKT_888, 5 铲, 矿物比 0.65, 第 12 辆车" << std::endl;
+    restore_pipeline_state(pipeline, "TKT_RESTORED_888", 5, 0.65f, 12);
 
     // --- 立即检查恢复后的内部状态 ---
     PipelineState* state_check = (PipelineState*)get_pipeline_state(pipeline);
@@ -306,7 +310,7 @@ void test_low_fps_video(void* pipeline, cv::VideoCapture& cap, const char* out_p
     if (orig_fps <= 0) orig_fps = 25.0; // 如果读不到，兜底假设为 25 帧
     double target_fps = 10.0;
 
-    set_pipeline_timeout(pipeline, 200000000000);
+    set_pipeline_timeout(pipeline, 60000);
 
     // 计算步长：比如原视频 30 帧，目标 4 帧，步长约等于 7
     // 这意味着物理世界过去了 7 帧的时间，AI 才处理 1 帧

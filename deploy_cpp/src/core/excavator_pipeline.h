@@ -32,7 +32,7 @@ extern "C" {
     EXCAVATOR_API void update_pipeline_config(void* handle, float conf_thresh, float iou_thresh);
 
     // 6. 断电恢复
-    EXCAVATOR_API void restore_pipeline_state(void* handle, const char* ticket_id, int bucket_count, float last_mineral_ratio);
+    EXCAVATOR_API void restore_pipeline_state(void* handle, const char* ticket_id, int bucket_count, float last_mineral_ratio, int total_truck_count);
 
     // 7. 动态设置超时时间
     EXCAVATOR_API void set_pipeline_timeout(void* handle, long long timeout_ms);
