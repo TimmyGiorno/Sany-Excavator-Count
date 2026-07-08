@@ -72,7 +72,7 @@ echo -------------------------------------------------------
 echo ▶ 执行测试 4：模拟边缘端低帧率 (10 FPS 抽帧大步长瞬移测试)
 echo -------------------------------------------------------
 :: 抽帧压力测试传入参数：<yolo模型> <视频> <test_mode=4>
-adb shell "export LD_LIBRARY_PATH=/data/local/tmp:$LD_LIBRARY_PATH && /data/local/tmp/test_excavator /data/local/tmp/best_320.rknn /data/local/tmp/test_time_out.mp4 4 /data/local/tmp/out_low_fps/low_fps_%%04d.jpg"
+adb shell "export LD_LIBRARY_PATH=/data/local/tmp:$LD_LIBRARY_PATH && /data/local/tmp/test_excavator /data/local/tmp/best_320.rknn /data/local/tmp/JFSK_20251230_110914_N1_00.mp4 4 /data/local/tmp/out_low_fps/low_fps_%%04d.jpg"
 
 echo.
 echo =======================================================

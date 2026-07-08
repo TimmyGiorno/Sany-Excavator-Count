@@ -176,6 +176,7 @@ Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_detectNative(JNIEnv *env, jc
     jobject resultObj = env->NewObject(resultClass, env->GetMethodID(resultClass, "<init>", "()V"));
 
     env->SetIntField(resultObj, env->GetFieldID(resultClass, "currentShovelCount", "I"), state->current_truck_buckets);
+    env->SetIntField(resultObj, env->GetFieldID(resultClass, "totalTruckCount", "I"), state->total_truck_count);
     env->SetBooleanField(resultObj, env->GetFieldID(resultClass, "isDumping", "Z"), state->dumping_active);
     env->SetBooleanField(resultObj, env->GetFieldID(resultClass, "isComplete", "Z"), !state->pending_truck_events.empty());
     env->SetBooleanField(resultObj, env->GetFieldID(resultClass, "isStartLoading", "Z"), state->current_truck_buckets >= 1);
@@ -266,11 +267,16 @@ Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_releaseNative(JNIEnv *env, j
 }
 
 JNIEXPORT void JNICALL
-Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_restoreStateNative(JNIEnv *env, jclass clazz, jlong handlePtr, jstring ticketId, jint bucketCount, jfloat lastMineralRatio, jint totalTruckCount) { // <-- 增加 jint totalTruckCount
+Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_restoreStateNative(JNIEnv *env, jclass clazz, jlong handlePtr, jstring ticketId, jint bucketCount, jfloat lastMineralRatio) {
     if (handlePtr == 0) return;
     const char* t_id = env->GetStringUTFChars(ticketId, 0);
-    restore_pipeline_state(reinterpret_cast<void*>(handlePtr), t_id, bucketCount, lastMineralRatio, totalTruckCount);
+    restore_pipeline_state(reinterpret_cast<void*>(handlePtr), t_id, bucketCount, lastMineralRatio);
     env->ReleaseStringUTFChars(ticketId, t_id);
+}
+
+JNIEXPORT void JNICALL
+Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_setTotalTruckCountNative(JNIEnv *env, jclass clazz, jlong handlePtr, jint count) {
+    if (handlePtr != 0) set_total_truck_count(reinterpret_cast<void*>(handlePtr), count);
 }
 
 JNIEXPORT void JNICALL

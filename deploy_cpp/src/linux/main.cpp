@@ -6,21 +6,21 @@
 #include <opencv2/opencv.hpp>
 #include "excavator_pipeline.h"
 
-// ================= 【新增】BBox基础结构 =================
+// ================= BBox基础结构 =================
 struct BBox {
     int xmin, ymin, xmax, ymax;
     float score;
     int class_id;
 };
 
-// ================= 服务器事件结构 (对齐最新版本) =================
+// ================= 服务器事件结构 =================
 struct BucketEvent {
     std::string ticket_id;
     int total_truck_count;
     int current_bucket_count;
     long long dump_start_time;
     long long dump_end_time;
-    float last_mineral_ratio; // 【新增】透传断崖比例
+    float last_mineral_ratio;
 };
 
 struct TruckEvent {
@@ -29,7 +29,7 @@ struct TruckEvent {
     int total_bucket_count;
     long long load_start_time;
     long long load_end_time;
-    int completed_type; // 【新增】0:开走，1:超时
+    int completed_type;
 };
 
 struct PendingBucket {
@@ -37,7 +37,7 @@ struct PendingBucket {
     long long dump_end_time;
 };
 
-// ================= 状态机与缓存区 (严格对齐最新版本) =================
+// ================= 状态机与缓存区 =================
 struct PipelineState {
     std::string ticket_id;
     int total_truck_count;
@@ -75,8 +75,8 @@ struct PipelineState {
     cv::Rect current_truck_box;
     cv::Rect last_dumping_bucket_box;
 
-    cv::Rect ui_bucket_box;  // 【新增】UI专用
-    cv::Rect ui_truck_box;   // 【新增】UI专用
+    cv::Rect ui_bucket_box;
+    cv::Rect ui_truck_box;
     std::vector<BBox> ui_all_detections; // 【新增】全量检测框
 
     int stable_frames_remaining;
@@ -204,8 +204,8 @@ void test_real_video(void* pipeline, cv::VideoCapture& cap, const char* out_patt
 void test_restore_only(void* pipeline, cv::VideoCapture& cap) {
     std::cout << "▶ 开始执行【模式 2: 纯断电恢复测试】..." << std::endl;
 
-    std::cout << ">>> [动作] 模拟断电重启，灌入状态：票号 TKT_888, 5 铲, 矿物比 0.65, 第 12 辆车" << std::endl;
-    restore_pipeline_state(pipeline, "TKT_RESTORED_888", 5, 0.65f, 12);
+    std::cout << ">>> [动作] 模拟断电重启，灌入状态：票号 TKT_888, 5 铲, 矿物比 0.65" << std::endl;
+    restore_pipeline_state(pipeline, "TKT_RESTORED_888", 5, 0.65f);
 
     // --- 立即检查恢复后的内部状态 ---
     PipelineState* state_check = (PipelineState*)get_pipeline_state(pipeline);
@@ -242,9 +242,6 @@ void test_restore_only(void* pipeline, cv::VideoCapture& cap) {
     }
 }
 
-// ========================================================
-// 模式 3：纯挂机超时预警测试 (智能捕捉时机版)
-// ========================================================
 // ========================================================
 // 模式 3：整理场地 / 挂机超时 断点续装测试
 // ========================================================

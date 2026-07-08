@@ -14,6 +14,8 @@ public class ExcavatorResult {
     private int currentShovelCount;
     private boolean isComplete;
 
+    private int totalTruckCount;
+
     // ================== 全量检测框数组 ==================
     // 0 空斗 1 满斗 2 卡车 3 载矿 4 卸矿 5 矿
     private int[] allDetections;
@@ -51,4 +53,7 @@ public class ExcavatorResult {
 
     public boolean isComplete() { return isComplete; }
     public void setComplete(boolean complete) { this.isComplete = complete; }
+
+    public int getTotalTruckCount() { return totalTruckCount; }
+    public void setTotalTruckCount(int totalTruckCount) { this.totalTruckCount = totalTruckCount; }
 }

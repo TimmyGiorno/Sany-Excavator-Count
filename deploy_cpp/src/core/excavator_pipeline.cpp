@@ -121,7 +121,7 @@ private:
         return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     }
 
-    cv::Mat letterbox(cv::Mat& img, float& ratio, int& dw, int& dh) {
+    cv::Mat letterbox(cv::Mat& img, float& ratio, int& dw, int& dh) const {
         int h = img.rows, w = img.cols;
         ratio = std::min((float)config.yolo_input_w / w, (float)config.yolo_input_h / h);
         int new_unpad_w = std::round(w * ratio);
@@ -149,9 +149,8 @@ private:
 
             bool should_push_event = true;
 
-            // 【核心拦截逻辑】
             if (completed_type == 1) {
-                // 如果是超时，拍下一张“铲数快照”
+                // 如果是超时，拍下一张 “铲数快照”
                 state.timeout_bucket_count = state.current_truck_buckets;
             }
             else if (completed_type == 0) {
@@ -177,13 +176,13 @@ private:
                 state.pending_truck_events.push_back(te);
             }
 
-            // 【注意】：无论是否推送事件，一旦发生换车(0)，状态机的清空动作必须照常执行！
+            // 无论是否推送事件，一旦发生换车，状态机的清空动作必须照常执行！
             if (completed_type == 0) {
                 state.is_truck_active = false;
                 state.ticket_id = "WAITING";
                 state.current_truck_buckets = 0;
                 state.has_pushed_timeout = false;
-                state.timeout_bucket_count = -1; // 【新增】清空快照，迎接新车
+                state.timeout_bucket_count = -1; // 清空快照，迎接新车
                 state.last_avg_ratio = -1.0f;
             }
         }
@@ -243,14 +242,10 @@ public:
     void updateConfig(const PipelineConfig& new_config) { long long old = config.timeout_ms; this->config = new_config; this->config.timeout_ms = old; }
     void setTimeout(long long timeout_ms) { this->config.timeout_ms = timeout_ms; }
 
-    void restoreState(const std::string& ticket_id, int bucket_count, float last_mineral_ratio, int total_truck_count) {
+    void restoreState(const std::string& ticket_id, int bucket_count, float last_mineral_ratio) {
         state.ticket_id = ticket_id;
         state.current_truck_buckets = bucket_count;
         state.last_avg_ratio = last_mineral_ratio;
-
-        if (total_truck_count > 0) {
-            state.total_truck_count = total_truck_count;
-        }
 
         if (bucket_count > 0) {
             state.is_truck_active = true;
@@ -265,6 +260,10 @@ public:
                 state.total_truck_count = 1;
             }
         }
+    }
+
+    void setTotalTruckCount(int count) {
+        if (count >= 0) state.total_truck_count = count;
     }
 
     void clear_events() {
@@ -408,7 +407,7 @@ public:
                 main_truck_rect = cv::Rect(best_t.xmin, best_t.ymin, best_t.xmax - best_t.xmin, best_t.ymax - best_t.ymin);
             }
 
-            if (best_bucket.class_id == 1) { // 检测到【满斗】
+            if (best_bucket.class_id == 1) { // 检测到满斗
                 if (state.pending_buckets > 0 && !state.is_statting && !state.dumping_active) {
                     commit_pending_buckets();
                 }
@@ -420,18 +419,18 @@ public:
                     if (main_truck_rect.area() > 0) {
                         overlap_main = check_horizontal_overlap(bb_rect, main_truck_rect);
 
-                        // 【核心突破】：判定高度！如果铲斗的上边缘，已经低于卡车框的 40% (即靠近地面)，认定为低处作业。
+                        // 如果铲斗的上边缘，已经低于卡车框的 40% (即靠近地面)，认定为低处作业
                         if (bb_rect.y > main_truck_rect.y + main_truck_rect.height * 0.4f) {
                             is_digging_low = true;
                         }
                     }
 
-                    // 只要不在卡车X轴上方，【或者】是在地面低处挖矿，立刻武装！完美放行车旁/车前挖矿！
+                    // 只要不在卡车 X 轴上方，或者是在地面低处挖矿，放行车旁 / 车前挖矿
                     if ((!overlap_main || is_digging_low) && !state.dumping_active && dumping_boxes.empty()) {
                         state.bucket_full = true;
                     }
                 }
-            } else if (best_bucket.class_id == 0) { // 检测到【空斗】
+            } else if (best_bucket.class_id == 0) { // 检测到空斗
                 if (state.bucket_full) {
 
                     bool overlap_main = false;
@@ -440,15 +439,15 @@ public:
                     if (main_truck_rect.area() > 0) {
                         overlap_main = check_horizontal_overlap(bb_rect, main_truck_rect);
 
-                        // 【二次保护】：如果空斗在地面（极大概率是 YOLO 甩臂时的残影误检），绝不触发卸矿！
+                        // 如果空斗在地面（极大概率是 YOLO 甩臂时的残影误检），不触发卸矿
                         if (bb_rect.y > main_truck_rect.y + main_truck_rect.height * 0.4f) {
                             is_hovering_high = false;
                         }
                     }
 
-                    // 必须在卡车 X 轴上方，【且】必须是在高处，才能触发真正的卸矿！
+                    // 必须在卡车 X 轴上方，且必须是在高处，才能触发真正的卸矿
                     if (overlap_main && is_hovering_high) {
-                        state.bucket_full = false; // 卸下满斗武装
+                        state.bucket_full = false; // 卸满斗
 
                         if (state.dumping_active || !dumping_boxes.empty()) {
                             state.pending_bucket_secured = true;
@@ -509,14 +508,14 @@ public:
             if (state.dumping_active) {
                 state.dumping_lost_frames++;
 
-                // (这里保留你在低 FPS 修改过的丢失容忍帧数，比如 6 帧或 15 帧)
+                // (这里保留低 FPS 修改过的丢失容忍帧数，比如 6 帧或 15 帧)
                 if (state.dumping_lost_frames > 6) {
                     state.dumping_active = false;
                     state.dumping_frame_count = 0;
                     state.dumping_lost_frames = 0;
 
                     // =========================================================
-                    // 【延迟结算执行点】：Dumping 动作彻底结束，统一收网！
+                    // 延迟结算执行点：Dumping 动作彻底结束，统一核销
                     // =========================================================
                     if (state.pending_bucket_secured) {
                         state.pending_bucket_secured = false;
@@ -541,7 +540,6 @@ public:
                         state.pending_queue.push_back(pb);
                         state.current_dump_start_time = 0;
                     }
-                    // =========================================================
 
                     state.stable_frames_remaining = 1;
 
@@ -671,7 +669,6 @@ public:
                 // 只要这 15 帧内哪怕只有 1 帧检出了矿，就不会被误判为 0
                 float avg_ratio = (valid_count > 0) ? (sum / valid_count) : 0.0f;
 
-                // 下方保留你原有的结算逻辑
                 if (state.last_avg_ratio < 0) {
                     state.last_avg_ratio = avg_ratio;
                     if (state.pending_buckets > 0) commit_pending_buckets();
@@ -738,11 +735,14 @@ extern "C" {
         ((ExcavatorPipeline*)handle)->updateConfig(cfg);
     }
     void release_pipeline(void* handle) { if (handle) delete (ExcavatorPipeline*)handle; }
-    void restore_pipeline_state(void* handle, const char* ticket_id, int bucket_count, float last_mineral_ratio, int total_truck_count) { // <-- 增加参数
+    void restore_pipeline_state(void* handle, const char* ticket_id, int bucket_count, float last_mineral_ratio) {
         if (handle) {
             std::string t_id = ticket_id ? std::string(ticket_id) : "";
-            ((ExcavatorPipeline*)handle)->restoreState(t_id, bucket_count, last_mineral_ratio, total_truck_count);
+            ((ExcavatorPipeline*)handle)->restoreState(t_id, bucket_count, last_mineral_ratio);
         }
+    }
+    void set_total_truck_count(void* handle, int count) {
+        if (handle) ((ExcavatorPipeline*)handle)->setTotalTruckCount(count);
     }
     void set_pipeline_timeout(void* handle, long long timeout_ms) { if (handle) ((ExcavatorPipeline*)handle)->setTimeout(timeout_ms); }
     void clear_pipeline_events(void* handle) { if (handle) ((ExcavatorPipeline*)handle)->clear_events(); }
