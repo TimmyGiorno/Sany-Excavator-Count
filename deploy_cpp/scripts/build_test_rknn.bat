@@ -36,7 +36,7 @@ adb push --sync %NDK_PATH%\toolchains\llvm\prebuilt\windows-x86_64\sysroot\usr\l
 adb push --sync ./3rdparty/opencv/opencv-4.13.0-android-sdk/OpenCV-android-sdk/sdk/native/libs/arm64-v8a/libopencv_java4.so /data/local/tmp/
 adb push --sync ./3rdparty/rknn/android/arm64-v8a/librknnrt.so /data/local/tmp/
 adb push --sync ./tmp_files/best_320.rknn /data/local/tmp/
-adb push --sync ./tmp_files/test_time_out.mp4 /data/local/tmp/
+adb push --sync ./tmp_files/eb179a1d0b55d5a0bd60be667975da07.mp4 /data/local/tmp/
 
 echo.
 echo =======================================================
@@ -72,14 +72,14 @@ echo -------------------------------------------------------
 echo ▶ 执行测试 4：模拟边缘端低帧率 (10 FPS 抽帧大步长瞬移测试)
 echo -------------------------------------------------------
 :: 抽帧压力测试传入参数：<yolo模型> <视频> <test_mode=4>
-adb shell "export LD_LIBRARY_PATH=/data/local/tmp:$LD_LIBRARY_PATH && /data/local/tmp/test_excavator /data/local/tmp/best_320.rknn /data/local/tmp/JFSK_20251230_110914_N1_00.mp4 4 /data/local/tmp/out_low_fps/low_fps_%%04d.jpg"
+adb shell "export LD_LIBRARY_PATH=/data/local/tmp:$LD_LIBRARY_PATH && /data/local/tmp/test_excavator /data/local/tmp/best_320.rknn /data/local/tmp/eb179a1d0b55d5a0bd60be667975da07.mp4 4 /data/local/tmp/out_low_fps/low_fps_%%04d.jpg"
 
 echo.
 echo =======================================================
 echo 正在从开发板拉取渲染图片...
 echo =======================================================
 :: 同时把常规图和低帧率抽帧图都拉回到本地的 ./tmp_files/ 目录下
-adb pull /data/local/tmp/out_frames/ ./tmp_files/
+:: adb pull /data/local/tmp/out_frames/ ./tmp_files/
 adb pull /data/local/tmp/out_low_fps/ ./tmp_files/
 
 echo.

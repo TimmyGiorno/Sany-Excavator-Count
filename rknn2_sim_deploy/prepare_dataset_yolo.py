@@ -4,7 +4,7 @@ import os
 # 1. 路径配置
 SOURCE_IMG_DIR = './raw_imgs_yolo'  # 原始场景图片文件夹
 OUTPUT_IMG_DIR = './calibration_imgs_yolo'  # 处理后输出的文件夹
-DATASET_TXT = './dataset.txt'  # 生成给 RKNN 用的 txt 文件路径
+DATASET_TXT = './dataset_yolo.txt'  # 生成给 RKNN 用的 txt 文件路径
 TARGET_SHAPE = (320, 320)  # 模型输入尺寸
 
 

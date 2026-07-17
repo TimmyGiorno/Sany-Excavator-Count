@@ -54,7 +54,6 @@ struct PipelineState {
     bool bucket_full;
     bool dumping_active;
     int dumping_frame_count;
-
     int dumping_lost_frames = 0;
 
     int retry_count;
@@ -318,7 +317,7 @@ void test_low_fps_video(void* pipeline, cv::VideoCapture& cap, const char* out_p
 
     cv::Mat frame;
     int raw_frame_count = 0;   // 视频本身的真实物理帧数
-    int infer_frame_count = 0; // AI 真正“看到”并处理的帧数
+    int infer_frame_count = 0; // AI 真正处理的帧数
     long long total_time_us = 0;
 
     while (cap.read(frame)) {
@@ -342,6 +341,7 @@ void test_low_fps_video(void* pipeline, cv::VideoCapture& cap, const char* out_p
 
         if (out_pattern != nullptr) {
             // ================== 全量画框逻辑 ==================
+            // 用全量方便 debug
             for (const auto& box : state->ui_all_detections) {
                 cv::Scalar color;
                 std::string label;
@@ -363,7 +363,7 @@ void test_low_fps_video(void* pipeline, cv::VideoCapture& cap, const char* out_p
             }
 
             char filename[512];
-            // 保存的文件名依然按 AI 处理的顺序编号，方便你变成图片序列查看
+            // 保存的文件名依然按 AI 处理的顺序编号，方便变成图片序列查看
             snprintf(filename, sizeof(filename), out_pattern, infer_frame_count);
             cv::imwrite(filename, frame);
         }
@@ -371,9 +371,9 @@ void test_low_fps_video(void* pipeline, cv::VideoCapture& cap, const char* out_p
         // 简化的性能打印
         if (infer_frame_count > 0 && infer_frame_count % 10 == 0) {
             double avg_time_ms = (double)total_time_us / 1000.0 / 10.0;
-//            std::cout << "📊 [模拟进度] 物理帧: " << raw_frame_count
-//                      << " | AI 已处理: " << infer_frame_count
-//                      << " 帧 | PC平均耗时: " << avg_time_ms << " ms" << std::endl;
+            std::cout << "📊 [模拟进度] 物理帧: " << raw_frame_count
+                      << " | AI 已处理: " << infer_frame_count
+                      << " 帧 | PC平均耗时: " << avg_time_ms << " ms" << std::endl;
             total_time_us = 0;
         }
     }
