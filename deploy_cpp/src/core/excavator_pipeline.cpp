@@ -18,6 +18,9 @@ struct PipelineConfig {
 
     long long timeout_ms = 60000; // 业务超时时间：1 分钟没动作就算超时
     float decline_thresh = 0.75f; // 切车阈值：矿石面积比例断崖式下跌 75% 时判定为换车
+
+    // 矿物面积比例阈值，小于 0.15 强制归零，防止局部凸起被拍平导致的误判切车
+    float min_mineral_ratio = 0.15f;
 };
 
 const std::vector<std::string> CLASSES = {"bucket-empty", "bucket-full", "truck", "loading", "dumping", "mine"};
@@ -67,6 +70,11 @@ struct PipelineState {
     int timeout_bucket_count = -1; // 记录超时瞬间的铲数，用于拦截假死车
 
     bool bucket_full = false; // 铲斗当前状态：true=满，false=空
+
+    // 状态反转防抖计数器
+    int full_confirm_frames = 0;
+    int empty_confirm_frames = 0;
+
     bool dumping_active = false; // 卸矿动作是否正在持续
     int dumping_frame_count = 0; // 卸矿动作维持的帧数
     int dumping_lost_frames = 0; // 容忍漏检的帧数（抗闪烁）
@@ -376,6 +384,12 @@ public:
                         int orig_xmax = std::round((x2 - dw) / ratio);
                         int orig_ymax = std::round((y2 - dh) / ratio);
 
+                        // 坐标硬裁切：防止幽灵框飞出屏幕导致虚假大面积！
+                        orig_xmin = std::max(0, std::min(frame.cols - 1, orig_xmin));
+                        orig_ymin = std::max(0, std::min(frame.rows - 1, orig_ymin));
+                        orig_xmax = std::max(0, std::min(frame.cols - 1, orig_xmax));
+                        orig_ymax = std::max(0, std::min(frame.rows - 1, orig_ymax));
+
                         nms_boxes.push_back(cv::Rect(orig_xmin, orig_ymin, orig_xmax - orig_xmin, orig_ymax - orig_ymin));
                         nms_scores.push_back(max_score);
                         nms_class_ids.push_back(best_class);
@@ -394,16 +408,34 @@ public:
         cv::dnn::NMSBoxes(offset_boxes, nms_scores, config.conf_thresh, config.iou_thresh, indices);
 
         std::vector<BBox> truck_boxes, bucket_boxes, dumping_boxes, mine_boxes;
-
         state.ui_all_detections.clear(); // 清洗界面上一帧的所有历史脏框
+
+        // 斩首机制：提取画面宽高的 85% 作为绝对上限
+        float max_w_limit = frame.cols * 0.85f;
+        float max_h_limit = frame.rows * 0.85f;
 
         // 将通过 NMS 筛查的框分类归档到各自的 Vector 数组中
         for (int idx : indices) {
-            BBox box = {nms_boxes[idx].x, nms_boxes[idx].y, nms_boxes[idx].x + nms_boxes[idx].width, nms_boxes[idx].y + nms_boxes[idx].height, nms_scores[idx], nms_class_ids[idx]};
+            int bw = nms_boxes[idx].width;
+            int bh = nms_boxes[idx].height;
+
+            // 任何占据画面超过 85% 的框直接丢弃
+            if (bw > max_w_limit || bh > max_h_limit) {
+                continue;
+            }
+
+            BBox box = {nms_boxes[idx].x, nms_boxes[idx].y, nms_boxes[idx].x + bw, nms_boxes[idx].y + bh, nms_scores[idx], nms_class_ids[idx]};
             state.ui_all_detections.push_back(box);
 
-            if (box.class_id == 2) truck_boxes.push_back(box);
-            else if (box.class_id == 0 || box.class_id == 1) bucket_boxes.push_back(box);
+            if (box.class_id == 2) {
+                truck_boxes.push_back(box);
+            }
+            else if (box.class_id == 0 || box.class_id == 1) {
+                // 宽或高不足 100 像素的不可能是近端作业的真铲斗
+                if (bw > 100 && bh > 100) {
+                    bucket_boxes.push_back(box);
+                }
+            }
             else if (box.class_id == 4) dumping_boxes.push_back(box);
             else if (box.class_id == 5) mine_boxes.push_back(box);
         }
@@ -416,9 +448,13 @@ public:
 
         // ============================== B. 铲斗满空判定与解锁 ==============================
         if (!bucket_boxes.empty()) {
-            // B.1. 选出当前帧置信度分数最高的那只铲斗
+            // 彻底舍弃分数最高原则！画面里谁的【面积最大】，谁才是真铲斗！直接从数学根源抹杀残留的背景误检。
             auto best_bucket = bucket_boxes[0];
-            for (const auto& bx : bucket_boxes) if (bx.score > best_bucket.score) best_bucket = bx;
+            float max_b_area = (best_bucket.xmax - best_bucket.xmin) * (best_bucket.ymax - best_bucket.ymin);
+            for (const auto& bx : bucket_boxes) {
+                float area = (bx.xmax - bx.xmin) * (bx.ymax - bx.ymin);
+                if (area > max_b_area) { max_b_area = area; best_bucket = bx; }
+            }
             cv::Rect bb_rect(best_bucket.xmin, best_bucket.ymin, best_bucket.xmax - best_bucket.xmin, best_bucket.ymax - best_bucket.ymin);
 
             // B.2. 锁定现场正在装载的唯一主卡车
@@ -435,6 +471,8 @@ public:
 
             // B.3. 状态分流
             if (best_bucket.class_id == 1) { // 检测到满斗
+                state.empty_confirm_frames = 0; // 【防抖】打断空斗连击
+
                 // 如果上一次动作挂起还没核销，且状态稳定，立刻在进满斗的瞬间把上一铲存进大车
                 if (state.pending_buckets > 0 && !state.is_statting && !state.dumping_active) {
                     commit_pending_buckets();
@@ -445,11 +483,20 @@ public:
                     bool is_digging_low = false; // 高度拦截变量
 
                     if (main_truck_rect.area() > 0) {
-                        overlap_main = check_horizontal_overlap(bb_rect, main_truck_rect); // 检查左右 X 轴是否重合
+                        bool horizontal_overlap = check_horizontal_overlap(bb_rect, main_truck_rect); // 检查左右 X 轴是否重合
+                        // 【透视深度防伪校验】：卡车宽度必须大于铲斗宽度的1.5倍，否则就是空间错位
+                        bool scale_matched = (main_truck_rect.width > bb_rect.width * 1.5f);
+                        overlap_main = horizontal_overlap && scale_matched;
 
                         // 如果铲斗的上边缘（Y值），掉到了卡车最高身位的 40% 以下（朝向地面靠拢）
                         // 证明挖掘机一定是在地势低的坑里挖土，绝对不可能在卡车头顶上变成满斗
                         if (bb_rect.y > main_truck_rect.y + main_truck_rect.height * 0.4f) {
+                            is_digging_low = true;
+                        }
+
+                        // 如果铲斗的下边缘（斗齿）掉到了卡车的下半身（70% 以下，即车轮和底盘的位置）
+                        // 毫无疑问铲斗是在前面的地上挖底土，绝不可能是在车上装矿！强制判定为地势低！
+                        if (bb_rect.y + bb_rect.height > main_truck_rect.y + main_truck_rect.height * 0.8f) {
                             is_digging_low = true;
                         }
                     }
@@ -457,63 +504,93 @@ public:
                     // 转换放行门槛：铲斗和卡车左右没重叠（在车厢外挖掘），或者虽然在车厢投影内，但在极低的地面位置挖矿
                     // 同时画面上不能有 dumping 卸矿残影。满足这些苛刻的物理条件，才准许将全局状态反转为 “满斗”
                     if ((!overlap_main || is_digging_low) && !state.dumping_active && dumping_boxes.empty()) {
-                        state.bucket_full = true;
+                        state.full_confirm_frames++; // 【防抖】累加满斗帧数
+                        if (state.full_confirm_frames >= 4) { // 连续4帧才放行
+                            state.bucket_full = true;
+                            state.full_confirm_frames = 0;
+                        }
+                    } else {
+                        state.full_confirm_frames = 0; // 条件不符立马归零
                     }
                 }
             } else if (best_bucket.class_id == 0) { // 检测到空斗
+                state.full_confirm_frames = 0; // 【防抖】打断满斗连击
+
                 if (state.bucket_full) { // 必须之前是满斗，才能往下走
 
                     bool overlap_main = false;
                     bool is_hovering_high = true; // 高空卸矿判定器
 
                     if (main_truck_rect.area() > 0) {
-                        overlap_main = check_horizontal_overlap(bb_rect, main_truck_rect); // 必须在卡车投影里
+                        bool horizontal_overlap = check_horizontal_overlap(bb_rect, main_truck_rect); // 必须在卡车投影里
+                        bool scale_matched = (main_truck_rect.width > bb_rect.width * 1.5f);
+                        overlap_main = horizontal_overlap && scale_matched;
 
                         // 如果空斗在靠地面的地方被识别，绝对是甩臂残影或者扬尘误检，高空拦截置 false
                         if (bb_rect.y > main_truck_rect.y + main_truck_rect.height * 0.4f) {
+                            is_hovering_high = false;
+                        }
+
+                        // 真正的倒矿，铲斗必须高高悬停在车厢的顶端。如果铲斗的下沿比卡车底盘还低（> 80%）
+                        // 说明它肯定是在近景的地上倒矿或者拍土，这叫空间重叠的视觉错位，强行阻断假卸矿！
+                        if (bb_rect.y + bb_rect.height > main_truck_rect.y + main_truck_rect.height * 0.8f) {
                             is_hovering_high = false;
                         }
                     }
 
                     // 铲斗开到了卡车上空（左右重叠） && 必须悬停在高空位置
                     if (overlap_main && is_hovering_high) {
-                        state.bucket_full = false; // 满斗卸空，状态机状态反转
+                        state.empty_confirm_frames++; // 【防抖】累加
+                        // 防扫射：真正的卸矿必须悬停，快速扫过的动作将被直接无视！
+                        if (state.empty_confirm_frames >= 6) {
+                            state.bucket_full = false; // 满斗卸空，状态机状态反转
+                            state.empty_confirm_frames = 0;
 
-                        // 如果当前画面正好抓到了 dumping 状态，说明烟尘很大，延迟核销战略
-                        if (state.dumping_active || !dumping_boxes.empty()) {
-                            state.pending_bucket_secured = true; // 上一把状态锁，通知后续流程等倒完再记账
-                            // 追溯卸矿起点时间戳
-                            state.secured_dump_start_time = state.current_dump_start_time > 0 ? state.current_dump_start_time : now;
-                        } else {
-                            // 没 dumping，常规记账
-                            state.total_bucket_count++;
-                            state.pending_buckets++;
-                            state.frames_since_bucket_empty = 0;
-                            state.last_action_time = now;
-                            state.has_pushed_timeout = false;
+                            // 【快照更新】：在倒矿刚刚发生的瞬间，立刻拍下快照！
+                            state.last_dumping_bucket_box = bb_rect;
 
-                            if (!state.is_truck_active) {
-                                state.is_truck_active = true;
-                                state.total_truck_count++;
-                                state.ticket_id = generate_ticket_id();
-                                state.current_truck_buckets = 0;
-                                state.truck_load_start_time = state.current_dump_start_time > 0 ? state.current_dump_start_time : now;
-                            }
+                            // 如果当前画面正好抓到了 dumping 状态，说明烟尘很大，延迟核销战略
+                            if (state.dumping_active || !dumping_boxes.empty()) {
+                                state.pending_bucket_secured = true; // 上一把状态锁，通知后续流程等倒完再记账
+                                // 追溯卸矿起点时间戳
+                                state.secured_dump_start_time = state.current_dump_start_time > 0 ? state.current_dump_start_time : now;
+                            } else {
+                                // 没 dumping，常规记账
+                                state.total_bucket_count++;
+                                state.pending_buckets++;
+                                state.frames_since_bucket_empty = 0;
+                                state.last_action_time = now;
+                                state.has_pushed_timeout = false;
 
-                            PendingBucket pb;
-                            pb.dump_start_time = state.current_dump_start_time > 0 ? state.current_dump_start_time : now;
-                            if (now - pb.dump_start_time < 500) pb.dump_start_time = now - 1500;
-                            pb.dump_end_time = now;
-                            state.pending_queue.push_back(pb);
-                            state.current_dump_start_time = 0;
+                                if (!state.is_truck_active) {
+                                    state.is_truck_active = true;
+                                    state.total_truck_count++;
+                                    state.ticket_id = generate_ticket_id();
+                                    state.current_truck_buckets = 0;
+                                    state.truck_load_start_time = state.current_dump_start_time > 0 ? state.current_dump_start_time : now;
+                                }
 
-                            if (state.stable_frames_remaining == 0 && !state.is_statting) {
-                                state.stable_frames_remaining = 1;
+                                PendingBucket pb;
+                                pb.dump_start_time = state.current_dump_start_time > 0 ? state.current_dump_start_time : now;
+                                if (now - pb.dump_start_time < 500) pb.dump_start_time = now - 1500;
+                                pb.dump_end_time = now;
+                                state.pending_queue.push_back(pb);
+                                state.current_dump_start_time = 0;
+
+                                if (state.stable_frames_remaining == 0 && !state.is_statting) {
+                                    state.stable_frames_remaining = 1;
+                                }
                             }
                         }
+                    } else {
+                        state.empty_confirm_frames = 0;
                     }
                 }
             }
+        } else {
+            // 如果画面里根本没有有效铲斗，防抖强行归零
+            state.full_confirm_frames = 0;
+            state.empty_confirm_frames = 0;
         }
 
         // ============================== C. 跟踪 Dumping 状态 ==============================
@@ -527,6 +604,16 @@ public:
 
             if (!state.dumping_active && state.dumping_frame_count >= 2) {
                 state.dumping_active = true; // 连续 2 帧稳定目击，确定真正的卸矿行为拉开序幕
+                // 刚检测到 dumping，趁铲斗没走远再更新一次快照
+                if (!bucket_boxes.empty()) {
+                    auto b = bucket_boxes[0];
+                    float max_area = (b.xmax - b.xmin) * (b.ymax - b.ymin);
+                    for (const auto& bx : bucket_boxes) {
+                        float a = (bx.xmax - bx.xmin) * (bx.ymax - bx.ymin);
+                        if (a > max_area) { max_area = a; b = bx; }
+                    }
+                    state.last_dumping_bucket_box = cv::Rect(b.xmin, b.ymin, b.xmax - b.xmin, b.ymax - b.ymin);
+                }
             }
 
             // 如果正在倒矿，说明画面的卡车和矿石都在剧烈变化，立刻强行阻断、清除后续的比例计算计数器
@@ -536,7 +623,6 @@ public:
                 state.stat_frames_remaining = 0;
                 state.ratio_buffer.clear();
                 state.current_truck_box = cv::Rect(0,0,0,0);
-                state.last_dumping_bucket_box = cv::Rect(0,0,0,0);
             }
         } else { // 画面上突然看不见 dumping 框了
             if (state.dumping_active) {
@@ -547,7 +633,6 @@ public:
                     state.dumping_active = false;
                     state.dumping_frame_count = 0;
                     state.dumping_lost_frames = 0;
-
 
                     if (state.pending_bucket_secured) { // 检查刚才在逻辑块B里上的那把安全锁
                         state.pending_bucket_secured = false;
@@ -574,16 +659,7 @@ public:
                         state.pending_queue.push_back(pb);
                         state.current_dump_start_time = 0;
                     }
-
                     state.stable_frames_remaining = 1;
-
-                    if (!bucket_boxes.empty()) {
-                        auto b = bucket_boxes[0];
-                        for (const auto& bx : bucket_boxes) if (bx.score > b.score) b = bx;
-                        state.last_dumping_bucket_box = cv::Rect(b.xmin, b.ymin, b.xmax - b.xmin, b.ymax - b.ymin);
-                    } else {
-                        state.last_dumping_bucket_box = cv::Rect(0,0,0,0);
-                    }
                 }
             } else {
                 state.dumping_frame_count = 0;
@@ -596,24 +672,17 @@ public:
             state.stable_frames_remaining--;
             if (state.stable_frames_remaining == 0) { // 尘埃落定，倒计时归零
 
-                // 如果刚才没抓到铲斗坐标，从当前帧强行挑一只出来作为几何参照物
-                if (state.last_dumping_bucket_box.area() == 0 && !bucket_boxes.empty()) {
-                    auto b = bucket_boxes[0];
-                    for (const auto& bx : bucket_boxes) if (bx.score > b.score) b = bx;
-                    state.last_dumping_bucket_box = cv::Rect(b.xmin, b.ymin, b.xmax - b.xmin, b.ymax - b.ymin);
-                }
+                if (!truck_boxes.empty()) {
+                    state.is_statting = true;
+                    state.ratio_buffer.clear(); // 清空 15 帧比例池
+                    state.stat_frames_remaining = 15; // 连续采样 15 帧
+                    state.retry_count = 0;
 
-                if (state.last_dumping_bucket_box.area() > 0) {
-                    if (!truck_boxes.empty()) {
-                        state.is_statting = true;
-                        state.ratio_buffer.clear(); // 清空 15 帧比例池
-                        state.stat_frames_remaining = 15; // 连续采样 15 帧
-                        state.retry_count = 0;
-
+                    if (state.last_dumping_bucket_box.area() > 0) {
                         float min_dist = 1e9;
                         float b_cx = state.last_dumping_bucket_box.x + state.last_dumping_bucket_box.width / 2.0f;
 
-                        // 找到那个和刚刚倒矿的铲斗水平 X 轴距离最近的卡车厢
+                        // 回到刚才拍下快照的地方去寻找对应的卡车
                         for (const auto& t : truck_boxes) {
                             float t_cx = t.xmin + (t.xmax - t.xmin) / 2.0f;
                             float dist = std::abs(t_cx - b_cx);
@@ -622,20 +691,18 @@ public:
                                 state.current_truck_box = cv::Rect(t.xmin, t.ymin, t.xmax - t.xmin, t.ymax - t.ymin);
                             }
                         }
-                        state.last_dumping_bucket_box = cv::Rect(0,0,0,0);
                     } else {
-                        state.retry_count++;
-                        if (state.retry_count < state.max_retry_count) {
-                            state.stable_frames_remaining = 1;
-                        } else {
-                            // 找车 5 次彻底失败，不要挂机，强行转 0 结算，防止遗留的 -1 泄露
-                            state.retry_count = 0;
-                            state.last_dumping_bucket_box = cv::Rect(0,0,0,0);
-
-                            if (state.last_avg_ratio < 0) state.last_avg_ratio = 0.0f;
-                            if (state.pending_buckets > 0) commit_pending_buckets();
+                        // 兜底找最大车
+                        auto best_t = truck_boxes[0];
+                        float max_area = (best_t.xmax - best_t.xmin) * (best_t.ymax - best_t.ymin);
+                        for (const auto& t : truck_boxes) {
+                            float area = (t.xmax - t.xmin) * (t.ymax - t.ymin);
+                            if (area > max_area) { max_area = area; best_t = t; }
                         }
+                        state.current_truck_box = cv::Rect(best_t.xmin, best_t.ymin, best_t.xmax - best_t.xmin, best_t.ymax - best_t.ymin);
                     }
+
+                    state.last_dumping_bucket_box = cv::Rect(0,0,0,0); // 用完后清空快照
                 } else {
                     state.retry_count++;
                     if (state.retry_count < state.max_retry_count) {
@@ -644,7 +711,6 @@ public:
                         // 找车 5 次彻底失败，不要挂机，强行转 0 结算，防止遗留的 -1 泄露
                         state.retry_count = 0;
                         state.last_dumping_bucket_box = cv::Rect(0,0,0,0);
-
                         if (state.last_avg_ratio < 0) state.last_avg_ratio = 0.0f;
                         if (state.pending_buckets > 0) commit_pending_buckets();
                     }
@@ -699,7 +765,7 @@ public:
                 float sum = 0;
                 int valid_count = 0;
                 for (float r : state.ratio_buffer) {
-                    if (r > 0.0f) {  // 直接过滤掉漏检导致的 0
+                    if (r > 0.0f) {
                         sum += r;
                         valid_count++;
                     }
@@ -707,6 +773,11 @@ public:
 
                 // 只要这 15 帧内哪怕只有 1 帧检出了矿，就不会被误判为 0
                 float avg_ratio = (valid_count > 0) ? (sum / valid_count) : 0.0f;
+
+                // 矿物比例低于预设阈值（默认 0.2），视为局部凸起被砸平，强行归零
+                if (avg_ratio < config.min_mineral_ratio) {
+                    avg_ratio = 0.0f;
+                }
 
                 if (state.last_avg_ratio < 0) { // 如果是今天开机的第一铲
                     state.last_avg_ratio = avg_ratio;
@@ -743,11 +814,14 @@ public:
         // ============================== G. 更新 UI 实时渲染框 ==============================
         // 找出当前置信度最高的一只铲斗和面积最大的一辆卡车，塞进 ui_bucket_box 和 ui_truck_box
         // 保证外层 Android JNI 能够用极细的帧率在平板屏幕上流畅渲染出“绿色追踪框”，方便司机肉眼对账
-        // 注：实际上一般都用全量画框，这个环节暂时保留
         state.ui_bucket_box = cv::Rect(0,0,0,0);
         if (!bucket_boxes.empty()) {
             auto b = bucket_boxes[0];
-            for (const auto& bx : bucket_boxes) if (bx.score > b.score) b = bx;
+            float max_area = (b.xmax - b.xmin) * (b.ymax - b.ymin);
+            for (const auto& bx : bucket_boxes) {
+                float a = (bx.xmax - bx.xmin) * (bx.ymax - bx.ymin);
+                if (a > max_area) { max_area = a; b = bx; }
+            }
             state.ui_bucket_box = cv::Rect(b.xmin, b.ymin, b.xmax - b.xmin, b.ymax - b.ymin);
         }
 
@@ -757,10 +831,7 @@ public:
             float max_area = (best_t.xmax - best_t.xmin) * (best_t.ymax - best_t.ymin);
             for (const auto& tx : truck_boxes) {
                 float area = (tx.xmax - tx.xmin) * (tx.ymax - tx.ymin);
-                if (area > max_area) {
-                    max_area = area;
-                    best_t = tx;
-                }
+                if (area > max_area) { max_area = area; best_t = tx; }
             }
             state.ui_truck_box = cv::Rect(best_t.xmin, best_t.ymin, best_t.xmax - best_t.xmin, best_t.ymax - best_t.ymin);
         }

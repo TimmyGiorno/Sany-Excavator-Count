@@ -131,6 +131,10 @@ Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_detectNative(JNIEnv *env, jc
         int timeout_bucket_count;
 
         bool bucket_full;
+
+        int full_confirm_frames;
+        int empty_confirm_frames;
+
         bool dumping_active;
         int dumping_frame_count;
 

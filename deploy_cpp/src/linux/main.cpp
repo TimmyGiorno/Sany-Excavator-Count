@@ -52,6 +52,10 @@ struct PipelineState {
     int timeout_bucket_count;
 
     bool bucket_full;
+
+    int full_confirm_frames;
+    int empty_confirm_frames;
+
     bool dumping_active;
     int dumping_frame_count;
     int dumping_lost_frames = 0;
