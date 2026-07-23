@@ -28,9 +28,9 @@ class VideoTracker:
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
         # ================= 业务参数配置 =================
-        self.timeout_ms = 60000  # 业务超时时间：1 分钟没动作就算超时
+        self.timeout_ms = 60000
         self.decline_threshold = 0.75
-        self.min_mineral_ratio = 0.15  # 矿物面积比例阈值，小于该值强制归零
+        self.min_mineral_ratio = 0.15
 
         # ================= 服务器事件结构列表 =================
         self.pending_bucket_events = []
@@ -44,7 +44,7 @@ class VideoTracker:
 
         self.pending_buckets = 0
         self.frames_since_bucket_empty = 0
-        self.pending_queue = []  # 记录挂起铲时间戳的队列
+        self.pending_queue = []
 
         self.has_pushed_timeout = False
         self.timeout_bucket_count = -1
@@ -59,7 +59,7 @@ class VideoTracker:
         self.dumping_lost_frames = 0
 
         self.retry_count = 0
-        self.max_retry_count = 5
+        self.max_retry_count = 15
 
         self.current_dump_start_time = 0
         self.truck_load_start_time = 0
@@ -81,7 +81,6 @@ class VideoTracker:
         self.ratio_buffer = []
         self.last_avg_ratio = -1.0
 
-        # 加载模型
         print(f">>> 正在加载模型: {self.model_path}")
         self.model = YOLO(self.model_path)
 
@@ -102,11 +101,9 @@ class VideoTracker:
         x2_min, x2_max = box2[0], box2[2]
         return not (x1_max < x2_min or x2_max < x1_min)
 
-    # ================= C++ 工具函数镜像 =================
     def _force_complete_truck(self, completed_type=0):
         if self.is_truck_active:
             should_push_event = True
-
             if completed_type == 1:
                 self.timeout_bucket_count = self.current_truck_buckets
             elif completed_type == 0:
@@ -264,10 +261,16 @@ class VideoTracker:
             elif class_id == 5:
                 mine_boxes.append(box_dict)
 
-        main_truck = max(truck_boxes, key=lambda t: t['w'] * t['h']) if truck_boxes else None
         best_bucket = max(bucket_boxes, key=lambda b: b['w'] * b['h']) if bucket_boxes else None
 
-        # ============================== 1. 铲斗变满判定 (直球模式) ==============================
+        # 【核心新增】：过滤掉面积小于等于铲斗框的背景假卡车
+        if best_bucket:
+            b_area = best_bucket['w'] * best_bucket['h']
+            truck_boxes = [t for t in truck_boxes if (t['w'] * t['h']) > b_area]
+
+        main_truck = max(truck_boxes, key=lambda t: t['w'] * t['h']) if truck_boxes else None
+
+        # ============================== 1. 铲斗变满判定 ==============================
         is_digging = False
         if loading_boxes or (best_bucket and best_bucket['class_id'] == 1):
             is_digging = True
@@ -282,7 +285,7 @@ class VideoTracker:
         else:
             self.full_confirm_frames = 0
 
-        # ============================== 2. 卸矿动作追踪 (绝对权威 + 空间立体防御) ==============================
+        # ============================== 2. 卸矿动作追踪 ==============================
         has_dumping = len(dumping_boxes) > 0
 
         if has_dumping:
@@ -300,24 +303,18 @@ class VideoTracker:
                 else:
                     self._last_dumping_bucket_xyxy = dumping_boxes[0]['xyxy']
 
-                # 【新增空间立体防御】：甄别是“往车里倒”还是“往车旁边的地上倒”
-                is_dumping_inside_truck = True  # 兜底信任
+                is_dumping_inside_truck = True
 
                 if main_truck:
-                    # 1. 基础 X 轴重叠 (排除在卡车左右很远的地方倒土)
                     overlap_x = self._check_horizontal_overlap(self._last_dumping_bucket_xyxy, main_truck['xyxy'])
-
                     if overlap_x:
-                        # 2. 如果水平重合，必须检查高度！
-                        # 真正的往车里倒矿，铲斗的顶部必须高于卡车高度的一半 (防倒在地上重叠的视觉错觉)
                         d_x1, d_y1, d_x2, d_y2 = self._last_dumping_bucket_xyxy
                         t_x1, t_y1, t_x2, t_y2 = main_truck['xyxy']
-                        t_h = t_y2 - t_y1
 
-                        is_high_enough = d_y1 < (t_y1 + t_h * 0.5)
+                        # 【核心修复】：铲斗的最上方必须在卡车的最上方之上
+                        is_high_enough = d_y1 < t_y1
                         is_dumping_inside_truck = is_high_enough
                     else:
-                        # 完全没水平重叠，肯定是在外边倒
                         is_dumping_inside_truck = False
 
                 if self.bucket_full:
@@ -325,15 +322,14 @@ class VideoTracker:
                         self.bucket_full = False
                         self.pending_bucket_secured = True
                         self.secured_dump_start_time = self.current_dump_start_time if self.current_dump_start_time > 0 else now_ms
-                    else:
-                        pass  # 触发立体拦截，不记账
 
-            if self.stable_frames_remaining > 0 or self.is_statting:
-                self.stable_frames_remaining = 0
-                self.is_statting = False
-                self.stat_frames_remaining = 0
-                self.ratio_buffer.clear()
-                self.current_truck_xyxy = None
+            if self.dumping_active:
+                if self.stable_frames_remaining > 0 or self.is_statting:
+                    self.stable_frames_remaining = 0
+                    self.is_statting = False
+                    self.stat_frames_remaining = 0
+                    self.ratio_buffer.clear()
+                    self.current_truck_xyxy = None
 
         else:
             if self.dumping_active:
@@ -349,15 +345,24 @@ class VideoTracker:
             # 兜底机制：出了空斗黄框并在车上
             elif best_bucket and best_bucket['class_id'] == 0 and self.bucket_full and main_truck:
                 if self._check_horizontal_overlap(best_bucket['xyxy'], main_truck['xyxy']):
-                    self.empty_confirm_frames += 1
+                    b_x1, b_y1, b_x2, b_y2 = best_bucket['xyxy']
+                    t_x1, t_y1, t_x2, t_y2 = main_truck['xyxy']
 
-                    if self.empty_confirm_frames >= 5:
-                        self.bucket_full = False
+                    # 【核心修复】：空斗的最上方必须在卡车的最上方之上
+                    is_high_enough = b_y1 < t_y1
+
+                    if is_high_enough:
+                        self.empty_confirm_frames += 1
+
+                        if self.empty_confirm_frames >= 5:
+                            self.bucket_full = False
+                            self.empty_confirm_frames = 0
+                            self._last_dumping_bucket_xyxy = best_bucket['xyxy']
+                            self.secured_dump_start_time = now_ms - 500
+                            self.pending_bucket_secured = True
+                            self._trigger_bucket_count(now_ms)
+                    else:
                         self.empty_confirm_frames = 0
-                        self._last_dumping_bucket_xyxy = best_bucket['xyxy']
-                        self.secured_dump_start_time = now_ms - 500
-                        self.pending_bucket_secured = True
-                        self._trigger_bucket_count(now_ms)
                 else:
                     self.empty_confirm_frames = 0
 
@@ -512,10 +517,8 @@ class VideoTracker:
 
             results = self.model.track(frame, persist=True, tracker=self.tracker_config, verbose=False)
 
-            # 【核心逻辑触发】
             self._update_state_machine(results[0], frame)
 
-            # 【输出 C++ 镜像事件到控制台】
             self._consume_and_print_events()
 
             end_time = time.time()
