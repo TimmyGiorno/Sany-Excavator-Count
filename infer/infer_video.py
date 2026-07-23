@@ -93,7 +93,8 @@ class VideoTracker:
         self.total_frames = None
 
     def get_counts(self):
-        return self.total_truck_count, self.current_truck_buckets, self.ticket_id, self.last_avg_ratio
+        display_buckets = self.current_truck_buckets + self.pending_buckets
+        return self.total_truck_count, display_buckets, self.ticket_id, self.last_avg_ratio, self.bucket_full
 
     @staticmethod
     def _check_horizontal_overlap(box1, box2):
@@ -192,6 +193,29 @@ class VideoTracker:
         self.pending_truck_events.clear()
         self.pending_bucket_events.clear()
 
+    def _trigger_bucket_count(self, now_ms):
+        self.pending_bucket_secured = False
+        self.total_bucket_count += 1
+        self.pending_buckets += 1
+        self.frames_since_bucket_empty = 0
+        self.last_action_time = now_ms
+        self.has_pushed_timeout = False
+
+        if not self.is_truck_active:
+            self.is_truck_active = True
+            self.total_truck_count += 1
+            self.ticket_id = f"TKT_{int(time.time() * 1000)}"
+            self.current_truck_buckets = 0
+            self.truck_load_start_time = self.secured_dump_start_time if self.secured_dump_start_time > 0 else now_ms
+
+        pb_start = self.secured_dump_start_time if self.secured_dump_start_time > 0 else now_ms
+        self.pending_queue.append({
+            "dump_start_time": pb_start,
+            "dump_end_time": now_ms
+        })
+        self.current_dump_start_time = 0
+        self.stable_frames_remaining = 1
+
     # ================= 核心状态机逻辑 =================
     def _update_state_machine(self, yolo_results, frame):
         now_ms = int(time.time() * 1000)
@@ -213,10 +237,7 @@ class VideoTracker:
         xyxy_list = boxes.xyxy.tolist()
         conf_list = boxes.conf.tolist()
 
-        truck_boxes, bucket_boxes, dumping_boxes, mine_boxes = [], [], [], []
-
-        max_w_limit = frame_w * 0.85
-        max_h_limit = frame_h * 0.85
+        truck_boxes, bucket_boxes, dumping_boxes, mine_boxes, loading_boxes = [], [], [], [], []
 
         for class_id, xyxy, conf in zip(class_ids, xyxy_list, conf_list):
             x1, y1, x2, y2 = xyxy
@@ -229,9 +250,6 @@ class VideoTracker:
             bw = x2 - x1
             bh = y2 - y1
 
-            if bw > max_w_limit or bh > max_h_limit:
-                continue
-
             box_dict = {'class_id': class_id, 'xyxy': [x1, y1, x2, y2], 'conf': conf, 'w': bw, 'h': bh}
 
             if class_id == 2:
@@ -239,120 +257,32 @@ class VideoTracker:
             elif class_id in [0, 1]:
                 if bw > 100 and bh > 100:
                     bucket_boxes.append(box_dict)
+            elif class_id == 3:
+                loading_boxes.append(box_dict)
             elif class_id == 4:
                 dumping_boxes.append(box_dict)
             elif class_id == 5:
                 mine_boxes.append(box_dict)
 
-        if not self.bucket_full and not self.pending_bucket_secured:
-            dumping_boxes.clear()
+        main_truck = max(truck_boxes, key=lambda t: t['w'] * t['h']) if truck_boxes else None
+        best_bucket = max(bucket_boxes, key=lambda b: b['w'] * b['h']) if bucket_boxes else None
 
-        # ============================== 1. 铲斗满空判定与解锁 ==============================
-        if bucket_boxes:
-            best_bucket = max(bucket_boxes, key=lambda b: b['w'] * b['h'])
-            bb_rect = best_bucket['xyxy']
-            bb_w, bb_h = best_bucket['w'], best_bucket['h']
-            class_id = best_bucket['class_id']
+        # ============================== 1. 铲斗变满判定 (直球模式) ==============================
+        is_digging = False
+        if loading_boxes or (best_bucket and best_bucket['class_id'] == 1):
+            is_digging = True
 
-            main_truck = None
-            if truck_boxes:
-                main_truck = max(truck_boxes, key=lambda t: t['w'] * t['h'])
-
-            if class_id == 1:  # FULL
-                self.empty_confirm_frames = 0
-
-                if self.pending_buckets > 0 and not self.is_statting and not self.dumping_active:
-                    self._commit_pending_buckets()
-
-                if not self.bucket_full:
-                    overlap_main = False
-                    is_digging_low = False
-
-                    if main_truck:
-                        tx1, ty1, tx2, ty2 = main_truck['xyxy']
-                        tw, th = tx2 - tx1, ty2 - ty1
-
-                        horizontal_overlap = self._check_horizontal_overlap(bb_rect, main_truck['xyxy'])
-                        scale_matched = tw > bb_w * 1.5
-                        overlap_main = horizontal_overlap and scale_matched
-
-                        if bb_rect[1] > ty1 + th * 0.4:
-                            is_digging_low = True
-                        if bb_rect[3] > ty1 + th * 0.8:
-                            is_digging_low = True
-
-                    if (not overlap_main or is_digging_low) and not self.dumping_active and not dumping_boxes:
-                        self.full_confirm_frames += 1
-                        if self.full_confirm_frames >= 4:
-                            self.bucket_full = True
-                            self.full_confirm_frames = 0
-                    else:
-                        self.full_confirm_frames = 0
-
-            elif class_id == 0:  # EMPTY
-                self.full_confirm_frames = 0
-
-                if self.bucket_full:
-                    overlap_main = False
-                    is_hovering_high = True
-
-                    if main_truck:
-                        tx1, ty1, tx2, ty2 = main_truck['xyxy']
-                        tw, th = tx2 - tx1, ty2 - ty1
-
-                        horizontal_overlap = self._check_horizontal_overlap(bb_rect, main_truck['xyxy'])
-                        scale_matched = tw > bb_w * 1.5
-                        overlap_main = horizontal_overlap and scale_matched
-
-                        if bb_rect[1] > ty1 + th * 0.4:
-                            is_hovering_high = False
-                        if bb_rect[3] > ty1 + th * 0.8:
-                            is_hovering_high = False
-
-                    if overlap_main and is_hovering_high:
-                        self.empty_confirm_frames += 1
-                        if self.empty_confirm_frames >= 6:
-                            self.bucket_full = False
-                            self.empty_confirm_frames = 0
-
-                            self._last_dumping_bucket_xyxy = bb_rect
-
-                            if self.dumping_active or dumping_boxes:
-                                self.pending_bucket_secured = True
-                                self.secured_dump_start_time = self.current_dump_start_time if self.current_dump_start_time > 0 else now_ms
-                            else:
-                                self.total_bucket_count += 1
-                                self.pending_buckets += 1
-                                self.frames_since_bucket_empty = 0
-                                self.last_action_time = now_ms
-                                self.has_pushed_timeout = False
-
-                                if not self.is_truck_active:
-                                    self.is_truck_active = True
-                                    self.total_truck_count += 1
-                                    self.ticket_id = f"TKT_{int(time.time() * 1000)}"
-                                    self.current_truck_buckets = 0
-                                    self.truck_load_start_time = self.current_dump_start_time if self.current_dump_start_time > 0 else now_ms
-
-                                pb_start = self.current_dump_start_time if self.current_dump_start_time > 0 else now_ms
-                                if now_ms - pb_start < 500:
-                                    pb_start = now_ms - 1500
-
-                                self.pending_queue.append({
-                                    "dump_start_time": pb_start,
-                                    "dump_end_time": now_ms
-                                })
-                                self.current_dump_start_time = 0
-
-                                if self.stable_frames_remaining == 0 and not self.is_statting:
-                                    self.stable_frames_remaining = 1
-                    else:
-                        self.empty_confirm_frames = 0
+        if is_digging and not self.dumping_active and not dumping_boxes:
+            self.empty_confirm_frames = 0
+            if not self.bucket_full:
+                self.full_confirm_frames += 1
+                if self.full_confirm_frames >= 3:
+                    self.bucket_full = True
+                    self.full_confirm_frames = 0
         else:
             self.full_confirm_frames = 0
-            self.empty_confirm_frames = 0
 
-        # ============================== 2. 跟踪 Dumping 状态 ==============================
+        # ============================== 2. 卸矿动作追踪 (绝对权威 + 空间立体防御) ==============================
         has_dumping = len(dumping_boxes) > 0
 
         if has_dumping:
@@ -364,9 +294,39 @@ class VideoTracker:
 
             if not self.dumping_active and self.dumping_frame_count >= 2:
                 self.dumping_active = True
-                if bucket_boxes:
-                    best_bucket = max(bucket_boxes, key=lambda b: b['w'] * b['h'])
+
+                if best_bucket:
                     self._last_dumping_bucket_xyxy = best_bucket['xyxy']
+                else:
+                    self._last_dumping_bucket_xyxy = dumping_boxes[0]['xyxy']
+
+                # 【新增空间立体防御】：甄别是“往车里倒”还是“往车旁边的地上倒”
+                is_dumping_inside_truck = True  # 兜底信任
+
+                if main_truck:
+                    # 1. 基础 X 轴重叠 (排除在卡车左右很远的地方倒土)
+                    overlap_x = self._check_horizontal_overlap(self._last_dumping_bucket_xyxy, main_truck['xyxy'])
+
+                    if overlap_x:
+                        # 2. 如果水平重合，必须检查高度！
+                        # 真正的往车里倒矿，铲斗的顶部必须高于卡车高度的一半 (防倒在地上重叠的视觉错觉)
+                        d_x1, d_y1, d_x2, d_y2 = self._last_dumping_bucket_xyxy
+                        t_x1, t_y1, t_x2, t_y2 = main_truck['xyxy']
+                        t_h = t_y2 - t_y1
+
+                        is_high_enough = d_y1 < (t_y1 + t_h * 0.5)
+                        is_dumping_inside_truck = is_high_enough
+                    else:
+                        # 完全没水平重叠，肯定是在外边倒
+                        is_dumping_inside_truck = False
+
+                if self.bucket_full:
+                    if is_dumping_inside_truck:
+                        self.bucket_full = False
+                        self.pending_bucket_secured = True
+                        self.secured_dump_start_time = self.current_dump_start_time if self.current_dump_start_time > 0 else now_ms
+                    else:
+                        pass  # 触发立体拦截，不记账
 
             if self.stable_frames_remaining > 0 or self.is_statting:
                 self.stable_frames_remaining = 0
@@ -384,30 +344,22 @@ class VideoTracker:
                     self.dumping_lost_frames = 0
 
                     if self.pending_bucket_secured:
-                        self.pending_bucket_secured = False
-                        self.total_bucket_count += 1
-                        self.pending_buckets += 1
-                        self.frames_since_bucket_empty = 0
-                        self.last_action_time = now_ms
-                        self.has_pushed_timeout = False
+                        self._trigger_bucket_count(now_ms)
 
-                        if not self.is_truck_active:
-                            self.is_truck_active = True
-                            self.total_truck_count += 1
-                            self.ticket_id = f"TKT_{int(time.time() * 1000)}"
-                            self.current_truck_buckets = 0
-                            self.truck_load_start_time = self.secured_dump_start_time if self.secured_dump_start_time > 0 else now_ms
+            # 兜底机制：出了空斗黄框并在车上
+            elif best_bucket and best_bucket['class_id'] == 0 and self.bucket_full and main_truck:
+                if self._check_horizontal_overlap(best_bucket['xyxy'], main_truck['xyxy']):
+                    self.empty_confirm_frames += 1
 
-                        self.pending_queue.append({
-                            "dump_start_time": self.secured_dump_start_time if self.secured_dump_start_time > 0 else now_ms,
-                            "dump_end_time": now_ms
-                        })
-                        self.current_dump_start_time = 0
-
-                    self.stable_frames_remaining = 1
-            else:
-                self.dumping_frame_count = 0
-                self.dumping_lost_frames = 0
+                    if self.empty_confirm_frames >= 5:
+                        self.bucket_full = False
+                        self.empty_confirm_frames = 0
+                        self._last_dumping_bucket_xyxy = best_bucket['xyxy']
+                        self.secured_dump_start_time = now_ms - 500
+                        self.pending_bucket_secured = True
+                        self._trigger_bucket_count(now_ms)
+                else:
+                    self.empty_confirm_frames = 0
 
         # ============================== 3. 寻找用于计算比值的卡车 ==============================
         if self.stable_frames_remaining > 0:
@@ -569,13 +521,13 @@ class VideoTracker:
             end_time = time.time()
             total_time_ms += (end_time - start_time) * 1000
 
-            trucks, buckets, tkt_id, ratio = self.get_counts()
+            trucks, buckets, tkt_id, ratio, is_full = self.get_counts()
 
-            # UI 渲染 (附带 Ratio)
+            # UI 渲染
             annotated_frame = results[0].plot()
 
             ui_x1, ui_y1 = self.width - 400, 20
-            ui_x2, ui_y2 = self.width - 20, 200  # 扩高 UI 黑框以容纳 Ratio
+            ui_x2, ui_y2 = self.width - 20, 240
             cv2.rectangle(annotated_frame, (ui_x1, ui_y1), (ui_x2, ui_y2), (0, 0, 0), -1)
 
             font = cv2.FONT_HERSHEY_SIMPLEX
@@ -590,10 +542,15 @@ class VideoTracker:
             cv2.putText(annotated_frame, f"Ticket:  {tkt_id}", (self.width - 380, 190), font, 0.7, (0, 255, 255), 2,
                         cv2.LINE_AA)
 
+            state_str = "FULL" if is_full else "EMPTY"
+            state_color = (0, 0, 255) if is_full else (0, 255, 255)
+            cv2.putText(annotated_frame, f"State:   {state_str}", (self.width - 380, 230), font, 1.0, state_color, 2,
+                        cv2.LINE_AA)
+
             self.out.write(annotated_frame)
 
-            if infer_frame_count % 10 == 0:
-                avg_time_ms = total_time_ms / 10.0
+            if infer_frame_count % 100 == 0:
+                avg_time_ms = total_time_ms / 100.0
                 print(
                     f"📊 [模拟进度] 物理帧: {raw_frame_count} / {self.total_frames} | AI 已处理: {infer_frame_count} 帧 | 平均耗时: {avg_time_ms:.2f} ms")
                 total_time_ms = 0
@@ -605,9 +562,9 @@ class VideoTracker:
 
 
 if __name__ == "__main__":
-    TEST_VIDEO = "./tmp_files/merged_output.mp4"
-    TRAINED_MODEL = "./tmp_files/best_640.pt"
-    OUTPUT_VIDEO = "./tmp_files/test5.mp4"
+    TEST_VIDEO = "./tmp_files/test2.mp4"
+    TRAINED_MODEL = "./tmp_files/best.pt"
+    OUTPUT_VIDEO = "./tmp_files/test2_output.mp4"
 
     tracker = VideoTracker(
         video_path=TEST_VIDEO,
