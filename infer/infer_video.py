@@ -280,13 +280,13 @@ class VideoTracker:
             self.empty_confirm_frames = 0
             if not self.bucket_full:
                 self.full_confirm_frames += 1
-                if self.full_confirm_frames >= 3:
+                if self.full_confirm_frames >= 20:
                     self.bucket_full = True
                     self.full_confirm_frames = 0
         else:
             self.full_confirm_frames = 0
 
-        # ============================== 2. 卸矿动作追踪 ==============================
+        # ============================== 2. 卸矿动作追踪 (仅做辅助，失去秒切结算特权) ==============================
         has_dumping = len(dumping_boxes) > 0
 
         if has_dumping:
@@ -296,7 +296,7 @@ class VideoTracker:
             if self.dumping_frame_count == 1:
                 self.current_dump_start_time = now_ms
 
-            if not self.dumping_active and self.dumping_frame_count >= 2:
+            if not self.dumping_active and self.dumping_frame_count >= 10:
                 self.dumping_active = True
 
                 if best_bucket:
@@ -311,61 +311,77 @@ class VideoTracker:
                     if overlap_x:
                         d_x1, d_y1, d_x2, d_y2 = self._last_dumping_bucket_xyxy
                         t_x1, t_y1, t_x2, t_y2 = main_truck['xyxy']
-
-                        # 【核心修复】：铲斗的最上方必须在卡车的最上方之上
-                        is_high_enough = d_y1 < t_y1
-                        is_dumping_inside_truck = is_high_enough
+                        # 空间立体防御：铲斗的最上方必须在卡车的最上方之上
+                        is_dumping_inside_truck = (d_y1 < t_y1)
                     else:
                         is_dumping_inside_truck = False
 
                 if self.bucket_full:
                     if is_dumping_inside_truck:
-                        self.bucket_full = False
+                        # 只发凭证不结算！
                         self.pending_bucket_secured = True
                         self.secured_dump_start_time = self.current_dump_start_time if self.current_dump_start_time > 0 else now_ms
 
-            if self.dumping_active:
-                if self.stable_frames_remaining > 0 or self.is_statting:
-                    self.stable_frames_remaining = 0
-                    self.is_statting = False
-                    self.stat_frames_remaining = 0
-                    self.ratio_buffer.clear()
-                    self.current_truck_xyxy = None
+            # 💥【核心修复 1】：之前的 self.dumping_active 打断比例统计的逻辑已彻底删除！
 
         else:
             if self.dumping_active:
                 self.dumping_lost_frames += 1
-                if self.dumping_lost_frames > 6:
+                if self.dumping_lost_frames > 15:  # 容忍 1.5 秒
                     self.dumping_active = False
                     self.dumping_frame_count = 0
                     self.dumping_lost_frames = 0
 
+                    # 💥【核心修复 2：飞天铲斗救场】
+                    # 卸矿彻底结束了，手里有凭证，但这 1.5 秒内空斗竟然都没出现！
+                    # 直接判定为铲斗飞出画面，强行核销凭证，触发记账与比例计算！
                     if self.pending_bucket_secured:
+                        self.bucket_full = False
+                        self.empty_confirm_frames = 0
                         self._trigger_bucket_count(now_ms)
+                        self.pending_bucket_secured = False
 
-            # 兜底机制：出了空斗黄框并在车上
-            elif best_bucket and best_bucket['class_id'] == 0 and self.bucket_full and main_truck:
-                if self._check_horizontal_overlap(best_bucket['xyxy'], main_truck['xyxy']):
+        # ============================== 2.5 真正的主轴：稳定空斗结算 ==============================
+        is_empty_detected = (best_bucket and best_bucket['class_id'] == 0)
+
+        # 💥【核心修复 3】：清理了之前忘记删除的老版兜底代码，统一走下面这个唯一判定
+        if is_empty_detected and self.bucket_full:
+            is_valid_empty = False
+
+            # 情况 A：手里有合法 dumping 凭证。只要现在变空，不管飞到哪，都算合法结算！
+            if self.pending_bucket_secured:
+                is_valid_empty = True
+            # 情况 B：YOLO 没看到 dumping (没凭证)，纯靠空斗来兜底。必须严格校验空斗的空间位置！
+            elif main_truck:
+                overlap_x = self._check_horizontal_overlap(best_bucket['xyxy'], main_truck['xyxy'])
+                if overlap_x:
                     b_x1, b_y1, b_x2, b_y2 = best_bucket['xyxy']
                     t_x1, t_y1, t_x2, t_y2 = main_truck['xyxy']
+                    is_valid_empty = (b_y1 < t_y1)
 
-                    # 【核心修复】：空斗的最上方必须在卡车的最上方之上
-                    is_high_enough = b_y1 < t_y1
+            if is_valid_empty:
+                self.empty_confirm_frames += 1
 
-                    if is_high_enough:
-                        self.empty_confirm_frames += 1
-
-                        if self.empty_confirm_frames >= 5:
-                            self.bucket_full = False
-                            self.empty_confirm_frames = 0
-                            self._last_dumping_bucket_xyxy = best_bucket['xyxy']
-                            self.secured_dump_start_time = now_ms - 500
-                            self.pending_bucket_secured = True
-                            self._trigger_bucket_count(now_ms)
-                    else:
-                        self.empty_confirm_frames = 0
-                else:
+                if self.empty_confirm_frames >= 10:
+                    self.bucket_full = False
                     self.empty_confirm_frames = 0
+                    self._last_dumping_bucket_xyxy = best_bucket['xyxy']
+
+                    if not self.pending_bucket_secured:
+                        self.secured_dump_start_time = now_ms - 2000
+
+                    self._trigger_bucket_count(now_ms)
+                    self.pending_bucket_secured = False  # 凭证消耗完毕
+
+                    # 强行重置卸料状态，防止残留烟尘假框干扰
+                    self.dumping_active = False
+                    self.dumping_frame_count = 0
+                    self.dumping_lost_frames = 0
+            else:
+                self.empty_confirm_frames = 0
+        else:
+            if not is_empty_detected:
+                self.empty_confirm_frames = 0
 
         # ============================== 3. 寻找用于计算比值的卡车 ==============================
         if self.stable_frames_remaining > 0:
