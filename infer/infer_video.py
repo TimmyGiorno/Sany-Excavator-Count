@@ -252,10 +252,7 @@ class VideoTracker:
             if class_id == 2:
                 truck_boxes.append(box_dict)
             elif class_id in [0, 1]:
-                if bw > 100 and bh > 100:
-                    bucket_boxes.append(box_dict)
-            elif class_id == 3:
-                loading_boxes.append(box_dict)
+                bucket_boxes.append(box_dict)
             elif class_id == 4:
                 dumping_boxes.append(box_dict)
             elif class_id == 5:
@@ -277,11 +274,9 @@ class VideoTracker:
         main_truck = max(truck_boxes, key=lambda t: t['w'] * t['h']) if truck_boxes else None
 
         # ============================== 1. 铲斗变满判定 ==============================
-        is_digging = False
-        if loading_boxes or (best_bucket and best_bucket['class_id'] == 1):
-            is_digging = True
+        is_full_detected = (best_bucket and best_bucket['class_id'] == 1)
 
-        if is_digging and not self.dumping_active and not dumping_boxes:
+        if is_full_detected and not self.dumping_active and not dumping_boxes:
             self.empty_confirm_frames = 0
             if not self.bucket_full:
                 self.full_confirm_frames += 1
