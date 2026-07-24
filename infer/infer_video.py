@@ -261,9 +261,15 @@ class VideoTracker:
             elif class_id == 5:
                 mine_boxes.append(box_dict)
 
-        best_bucket = max(bucket_boxes, key=lambda b: b['w'] * b['h']) if bucket_boxes else None
+        # ============================== 0. 唯一置信度最高铲斗提取 ==============================
+        # 如果检测到多个铲斗框（如同时存在 empty 和 full），强制只保留置信度 (conf) 最高的唯一框
+        if len(bucket_boxes) > 1:
+            best_conf_bucket = max(bucket_boxes, key=lambda b: b['conf'])
+            bucket_boxes = [best_conf_bucket]
 
-        # 【核心新增】：过滤掉面积小于等于铲斗框的背景假卡车
+        best_bucket = bucket_boxes[0] if bucket_boxes else None
+
+        # 过滤掉面积小于等于铲斗框的背景假卡车
         if best_bucket:
             b_area = best_bucket['w'] * best_bucket['h']
             truck_boxes = [t for t in truck_boxes if (t['w'] * t['h']) > b_area]
