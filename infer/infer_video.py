@@ -383,7 +383,7 @@ class VideoTracker:
             if not is_empty_detected:
                 self.empty_confirm_frames = 0
 
-        # ============================== 3. 💥 实时跟踪采集核心 ==============================
+        # ============================== 3. 实时跟踪采集核心 ==============================
         # 当正在卸载，或者空斗正在消抖确认期间，就认定是“核心动作捕捉区”
         critical_zone = self.dumping_active or self.pending_bucket_secured or (self.empty_confirm_frames > 0)
 
@@ -469,7 +469,6 @@ class VideoTracker:
             cv2.rectangle(annotated_frame, (ui_x1, ui_y1), (ui_x2, ui_y2), (0, 0, 0), -1)
 
             font = cv2.FONT_HERSHEY_SIMPLEX
-            # 💥 因为改用全图面积，数值变小，改为保留四位小数便于观察
             ratio_str = "0.0000" if ratio < 0 else f"{ratio:.4f}"
 
             cv2.putText(annotated_frame, f"Trucks:  {trucks}", (40, 60), font, 1.0, (0, 255, 0), 2, cv2.LINE_AA)
