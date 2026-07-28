@@ -58,9 +58,6 @@ class VideoTracker:
         self.dumping_frame_count = 0
         self.dumping_lost_frames = 0
 
-        self.retry_count = 0
-        self.max_retry_count = 15
-
         self.current_dump_start_time = 0
         self.truck_load_start_time = 0
         self.truck_load_end_time = 0
@@ -72,12 +69,8 @@ class VideoTracker:
         self.pending_bucket_secured = False
         self.secured_dump_start_time = 0
 
-        self.current_truck_xyxy = None
         self._last_dumping_bucket_xyxy = None
 
-        self.stable_frames_remaining = 0
-        self.is_statting = False
-        self.stat_frames_remaining = 0
         self.ratio_buffer = []
         self.last_avg_ratio = -1.0
 
@@ -211,7 +204,28 @@ class VideoTracker:
             "dump_end_time": now_ms
         })
         self.current_dump_start_time = 0
-        self.stable_frames_remaining = 1
+
+        valid_ratios = [r for r in self.ratio_buffer if r > 0.0]
+        avg_ratio = sum(valid_ratios) / len(valid_ratios) if valid_ratios else 0.0
+        self.ratio_buffer.clear()
+
+        if avg_ratio < self.min_mineral_ratio:
+            avg_ratio = 0.0
+
+        if self.last_avg_ratio < 0:
+            self.last_avg_ratio = avg_ratio
+            self._commit_pending_buckets()
+        else:
+            if self.last_avg_ratio == 0.0 and avg_ratio == 0.0:
+                self.last_avg_ratio = avg_ratio
+                self._commit_pending_buckets()
+            else:
+                decline = (self.last_avg_ratio - avg_ratio) / self.last_avg_ratio if self.last_avg_ratio > 0 else 0.0
+                if avg_ratio == 0.0 or decline >= self.decline_threshold:
+                    self._cut_truck(now_ms, avg_ratio)
+                else:
+                    self.last_avg_ratio = avg_ratio
+                    self._commit_pending_buckets()
 
     # ================= 核心状态机逻辑 =================
     def _update_state_machine(self, yolo_results, frame):
@@ -258,15 +272,12 @@ class VideoTracker:
             elif class_id == 5:
                 mine_boxes.append(box_dict)
 
-        # ============================== 0. 唯一置信度最高铲斗提取 ==============================
-        # 如果检测到多个铲斗框（如同时存在 empty 和 full），强制只保留置信度 (conf) 最高的唯一框
         if len(bucket_boxes) > 1:
             best_conf_bucket = max(bucket_boxes, key=lambda b: b['conf'])
             bucket_boxes = [best_conf_bucket]
 
         best_bucket = bucket_boxes[0] if bucket_boxes else None
 
-        # 过滤掉面积小于等于铲斗框的背景假卡车
         if best_bucket:
             b_area = best_bucket['w'] * best_bucket['h']
             truck_boxes = [t for t in truck_boxes if (t['w'] * t['h']) > b_area]
@@ -283,10 +294,11 @@ class VideoTracker:
                 if self.full_confirm_frames >= 20:
                     self.bucket_full = True
                     self.full_confirm_frames = 0
+                    self.ratio_buffer.clear()  # 防止残留比例干扰
         else:
             self.full_confirm_frames = 0
 
-        # ============================== 2. 卸矿动作追踪 (仅做辅助，失去秒切结算特权) ==============================
+        # ============================== 2. 卸矿动作追踪 ==============================
         has_dumping = len(dumping_boxes) > 0
 
         if has_dumping:
@@ -304,54 +316,43 @@ class VideoTracker:
                 else:
                     self._last_dumping_bucket_xyxy = dumping_boxes[0]['xyxy']
 
-                is_dumping_inside_truck = True
+                is_dumping_inside_truck = False
 
                 if main_truck:
                     overlap_x = self._check_horizontal_overlap(self._last_dumping_bucket_xyxy, main_truck['xyxy'])
                     if overlap_x:
                         d_x1, d_y1, d_x2, d_y2 = self._last_dumping_bucket_xyxy
                         t_x1, t_y1, t_x2, t_y2 = main_truck['xyxy']
-                        # 空间立体防御：铲斗的最上方必须在卡车的最上方之上
                         is_dumping_inside_truck = (d_y1 < t_y1)
                     else:
                         is_dumping_inside_truck = False
 
                 if self.bucket_full:
                     if is_dumping_inside_truck:
-                        # 只发凭证不结算！
                         self.pending_bucket_secured = True
                         self.secured_dump_start_time = self.current_dump_start_time if self.current_dump_start_time > 0 else now_ms
-
-            # 💥【核心修复 1】：之前的 self.dumping_active 打断比例统计的逻辑已彻底删除！
-
         else:
             if self.dumping_active:
                 self.dumping_lost_frames += 1
-                if self.dumping_lost_frames > 15:  # 容忍 1.5 秒
+                if self.dumping_lost_frames > 15:
                     self.dumping_active = False
                     self.dumping_frame_count = 0
                     self.dumping_lost_frames = 0
 
-                    # 💥【核心修复 2：飞天铲斗救场】
-                    # 卸矿彻底结束了，手里有凭证，但这 1.5 秒内空斗竟然都没出现！
-                    # 直接判定为铲斗飞出画面，强行核销凭证，触发记账与比例计算！
                     if self.pending_bucket_secured:
                         self.bucket_full = False
                         self.empty_confirm_frames = 0
                         self._trigger_bucket_count(now_ms)
                         self.pending_bucket_secured = False
 
-        # ============================== 2.5 真正的主轴：稳定空斗结算 ==============================
+        # ============================== 2.5 稳定空斗结算 ==============================
         is_empty_detected = (best_bucket and best_bucket['class_id'] == 0)
 
-        # 💥【核心修复 3】：清理了之前忘记删除的老版兜底代码，统一走下面这个唯一判定
         if is_empty_detected and self.bucket_full:
             is_valid_empty = False
 
-            # 情况 A：手里有合法 dumping 凭证。只要现在变空，不管飞到哪，都算合法结算！
             if self.pending_bucket_secured:
                 is_valid_empty = True
-            # 情况 B：YOLO 没看到 dumping (没凭证)，纯靠空斗来兜底。必须严格校验空斗的空间位置！
             elif main_truck:
                 overlap_x = self._check_horizontal_overlap(best_bucket['xyxy'], main_truck['xyxy'])
                 if overlap_x:
@@ -371,9 +372,8 @@ class VideoTracker:
                         self.secured_dump_start_time = now_ms - 2000
 
                     self._trigger_bucket_count(now_ms)
-                    self.pending_bucket_secured = False  # 凭证消耗完毕
+                    self.pending_bucket_secured = False
 
-                    # 强行重置卸料状态，防止残留烟尘假框干扰
                     self.dumping_active = False
                     self.dumping_frame_count = 0
                     self.dumping_lost_frames = 0
@@ -383,112 +383,30 @@ class VideoTracker:
             if not is_empty_detected:
                 self.empty_confirm_frames = 0
 
-        # ============================== 3. 寻找用于计算比值的卡车 ==============================
-        if self.stable_frames_remaining > 0:
-            self.stable_frames_remaining -= 1
-            if self.stable_frames_remaining == 0:
-                if truck_boxes:
-                    self.is_statting = True
-                    self.ratio_buffer.clear()
-                    self.stat_frames_remaining = 15
-                    self.retry_count = 0
+        # ============================== 3. 💥 实时跟踪采集核心 ==============================
+        # 当正在卸载，或者空斗正在消抖确认期间，就认定是“核心动作捕捉区”
+        critical_zone = self.dumping_active or self.pending_bucket_secured or (self.empty_confirm_frames > 0)
 
-                    if self._last_dumping_bucket_xyxy is not None:
-                        min_distance = float('inf')
-                        b_cx = (self._last_dumping_bucket_xyxy[0] + self._last_dumping_bucket_xyxy[2]) / 2.0
-                        for truck in truck_boxes:
-                            t_cx = (truck['xyxy'][0] + truck['xyxy'][2]) / 2.0
-                            dist = abs(t_cx - b_cx)
-                            if dist < min_distance:
-                                min_distance = dist
-                                self.current_truck_xyxy = truck['xyxy']
-                    else:
-                        best_t = max(truck_boxes, key=lambda t: t['w'] * t['h'])
-                        self.current_truck_xyxy = best_t['xyxy']
+        if critical_zone and main_truck:
+            frame_area = frame_w * frame_h
+            max_mine_area = 0.0
 
-                    self._last_dumping_bucket_xyxy = None
-                else:
-                    self.retry_count += 1
-                    if self.retry_count < self.max_retry_count:
-                        self.stable_frames_remaining = 1
-                    else:
-                        self.retry_count = 0
-                        self._last_dumping_bucket_xyxy = None
-                        if self.last_avg_ratio < 0:
-                            self.last_avg_ratio = 0.0
-                        if self.pending_buckets > 0:
-                            self._commit_pending_buckets()
+            # 遍历所有与卡车水平重合的矿物，找到最大的
+            for mine in mine_boxes:
+                if self._check_horizontal_overlap(main_truck['xyxy'], mine['xyxy']):
+                    mx1, my1, mx2, my2 = mine['xyxy']
+                    m_area = (mx2 - mx1) * (my2 - my1)
+                    if m_area > max_mine_area:
+                        max_mine_area = m_area
 
-        # ============================== 4. 真实比例断崖下跌计算 ==============================
-        if self.is_statting and self.stat_frames_remaining > 0:
-            self.stat_frames_remaining -= 1
+            # 使用全图面积作为分母，彻底免疫卡车被截断的干扰，该数值要乘 3
+            self.ratio_buffer.append(3 * max_mine_area / frame_area)
 
-            if self.current_truck_xyxy is not None and truck_boxes:
-                min_dist = float('inf')
-                best_t_xyxy = None
-                prev_cx = (self.current_truck_xyxy[0] + self.current_truck_xyxy[2]) / 2.0
+            # 防止长时间停滞导致内存溢出
+            if len(self.ratio_buffer) > 100:
+                self.ratio_buffer.pop(0)
 
-                for truck in truck_boxes:
-                    t_cx = (truck['xyxy'][0] + truck['xyxy'][2]) / 2.0
-                    dist = abs(t_cx - prev_cx)
-                    if dist < min_dist:
-                        min_dist = dist
-                        best_t_xyxy = truck['xyxy']
-
-                if best_t_xyxy is not None:
-                    self.current_truck_xyxy = best_t_xyxy
-                    tx1, ty1, tx2, ty2 = best_t_xyxy
-                    truck_area = (tx2 - tx1) * (ty2 - ty1)
-                    max_mine_area = 0.0
-
-                    for mine in mine_boxes:
-                        if self._check_horizontal_overlap(best_t_xyxy, mine['xyxy']):
-                            mx1, my1, mx2, my2 = mine['xyxy']
-                            m_area = (mx2 - mx1) * (my2 - my1)
-                            if m_area > max_mine_area:
-                                max_mine_area = m_area
-                    self.ratio_buffer.append(max_mine_area / truck_area)
-                else:
-                    self.ratio_buffer.append(0.0)
-            else:
-                self.ratio_buffer.append(0.0)
-
-            if self.stat_frames_remaining == 0:
-                self.is_statting = False
-
-                valid_ratios = [r for r in self.ratio_buffer if r > 0.0]
-                avg_ratio = sum(valid_ratios) / len(valid_ratios) if valid_ratios else 0.0
-
-                if avg_ratio < self.min_mineral_ratio:
-                    avg_ratio = 0.0
-
-                if self.last_avg_ratio < 0:
-                    self.last_avg_ratio = avg_ratio
-                    if self.pending_buckets > 0:
-                        self._commit_pending_buckets()
-                else:
-                    if self.last_avg_ratio == 0.0 and avg_ratio == 0.0:
-                        self.last_avg_ratio = avg_ratio
-                        if self.pending_buckets > 0:
-                            self._commit_pending_buckets()
-                    else:
-                        decline = (
-                                              self.last_avg_ratio - avg_ratio) / self.last_avg_ratio if self.last_avg_ratio > 0 else 0.0
-
-                        if avg_ratio == 0.0 or decline >= self.decline_threshold:
-                            self._cut_truck(now_ms, avg_ratio)
-                        else:
-                            self.last_avg_ratio = avg_ratio
-                            if self.pending_buckets > 0:
-                                self._commit_pending_buckets()
-
-                self.current_truck_xyxy = None
-
-        # ============================== 5. 快速强行合并兜底 ==============================
-        if self.pending_buckets > 0 and self.frames_since_bucket_empty > 60 and not self.is_statting and not self.dumping_active:
-            if self.last_avg_ratio < 0:
-                self.last_avg_ratio = 0.0
-            self._commit_pending_buckets()
+        # 旧版的老步骤 4 和 5 已经被彻底消灭了，都在 trigger 里完成了瞬间结算。
 
     def run_video_inference(self, target_fps=10.0):
         print(f">>> 正在打开视频: {self.video_path}")
@@ -546,26 +464,18 @@ class VideoTracker:
             # UI 渲染
             annotated_frame = results[0].plot()
 
-            ui_x1, ui_y1 = self.width - 400, 20
-            ui_x2, ui_y2 = self.width - 20, 240
+            ui_x1, ui_y1 = 20, 20
+            ui_x2, ui_y2 = 400, 240
             cv2.rectangle(annotated_frame, (ui_x1, ui_y1), (ui_x2, ui_y2), (0, 0, 0), -1)
 
             font = cv2.FONT_HERSHEY_SIMPLEX
-            ratio_str = "0.00" if ratio < 0 else f"{ratio:.2f}"
+            # 💥 因为改用全图面积，数值变小，改为保留四位小数便于观察
+            ratio_str = "0.0000" if ratio < 0 else f"{ratio:.4f}"
 
-            cv2.putText(annotated_frame, f"Trucks:  {trucks}", (self.width - 380, 60), font, 1.0, (0, 255, 0), 2,
-                        cv2.LINE_AA)
-            cv2.putText(annotated_frame, f"Buckets: {buckets}", (self.width - 380, 105), font, 1.0, (0, 255, 0), 2,
-                        cv2.LINE_AA)
-            cv2.putText(annotated_frame, f"Ratio:   {ratio_str}", (self.width - 380, 150), font, 1.0, (0, 255, 0), 2,
-                        cv2.LINE_AA)
-            cv2.putText(annotated_frame, f"Ticket:  {tkt_id}", (self.width - 380, 190), font, 0.7, (0, 255, 255), 2,
-                        cv2.LINE_AA)
-
-            state_str = "FULL" if is_full else "EMPTY"
-            state_color = (0, 0, 255) if is_full else (0, 255, 255)
-            cv2.putText(annotated_frame, f"State:   {state_str}", (self.width - 380, 230), font, 1.0, state_color, 2,
-                        cv2.LINE_AA)
+            cv2.putText(annotated_frame, f"Trucks:  {trucks}", (40, 60), font, 1.0, (0, 255, 0), 2, cv2.LINE_AA)
+            cv2.putText(annotated_frame, f"Buckets: {buckets}", (40, 105), font, 1.0, (0, 255, 0), 2, cv2.LINE_AA)
+            cv2.putText(annotated_frame, f"Ratio:   {ratio_str}", (40, 150), font, 1.0, (0, 255, 0), 2, cv2.LINE_AA)
+            cv2.putText(annotated_frame, f"Ticket:  {tkt_id}", (40, 190), font, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
 
             self.out.write(annotated_frame)
 
@@ -582,9 +492,9 @@ class VideoTracker:
 
 
 if __name__ == "__main__":
-    TEST_VIDEO = "./tmp_files/test2.mp4"
+    TEST_VIDEO = "./tmp_files/test5.mp4"
     TRAINED_MODEL = "./tmp_files/best.pt"
-    OUTPUT_VIDEO = "./tmp_files/test2_output.mp4"
+    OUTPUT_VIDEO = "./tmp_files/test5_output.mp4"
 
     tracker = VideoTracker(
         video_path=TEST_VIDEO,
