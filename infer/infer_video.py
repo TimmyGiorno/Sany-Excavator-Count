@@ -30,7 +30,7 @@ class VideoTracker:
         # ================= 业务参数配置 =================
         self.timeout_ms = 60000
         self.decline_threshold = 0.75
-        self.min_mineral_ratio = 0.15
+        self.min_mineral_ratio = 0.1
 
         # ================= 服务器事件结构列表 =================
         self.pending_bucket_events = []
@@ -205,14 +205,20 @@ class VideoTracker:
         })
         self.current_dump_start_time = 0
 
-        valid_ratios = [r for r in self.ratio_buffer if r > 0.0]
-        avg_ratio = sum(valid_ratios) / len(valid_ratios) if valid_ratios else 0.0
+        total_sum = sum(self.ratio_buffer)
+
+        # 分母使用全量帧数，不管帧里有没有检测到矿物
+        if len(self.ratio_buffer) == 0:
+            avg_ratio = 0.0
+        else:
+            avg_ratio = total_sum / len(self.ratio_buffer)
+
         self.ratio_buffer.clear()
 
         if avg_ratio < self.min_mineral_ratio:
             avg_ratio = 0.0
 
-        if self.last_avg_ratio < 0:
+        if self.last_avg_ratio < 0.0:
             self.last_avg_ratio = avg_ratio
             self._commit_pending_buckets()
         else:
@@ -220,7 +226,10 @@ class VideoTracker:
                 self.last_avg_ratio = avg_ratio
                 self._commit_pending_buckets()
             else:
-                decline = (self.last_avg_ratio - avg_ratio) / self.last_avg_ratio if self.last_avg_ratio > 0 else 0.0
+                decline = 0.0
+                if self.last_avg_ratio > 0.0:
+                    decline = (self.last_avg_ratio - avg_ratio) / self.last_avg_ratio
+
                 if avg_ratio == 0.0 or decline >= self.decline_threshold:
                     self._cut_truck(now_ms, avg_ratio)
                 else:
@@ -491,7 +500,7 @@ class VideoTracker:
 
 
 if __name__ == "__main__":
-    TEST_VIDEO = "./tmp_files/test5.mp4"
+    TEST_VIDEO = "./tmp_files/test1.mp4"
     TRAINED_MODEL = "./tmp_files/best.pt"
     OUTPUT_VIDEO = "./tmp_files/test5_output.mp4"
 
