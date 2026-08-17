@@ -114,9 +114,9 @@ Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_detectNative(JNIEnv *env, jc
     struct BucketEvent { std::string ticket_id; int total_truck_count; int current_bucket_count; long long dump_start_time; long long dump_end_time; float last_mineral_ratio; };
     struct TruckEvent { std::string ticket_id; int total_truck_count; int total_bucket_count; long long load_start_time; long long load_end_time; int completed_type; };
     struct PendingBucket { long long dump_start_time; long long dump_end_time; };
-
     struct BBox { int xmin, ymin, xmax, ymax; float score; int class_id; };
 
+    // 💥 移除了旧版的冗余参数，严格与 C++ 层结构内存一致 💥
     struct PipelineStateMem {
         std::string ticket_id;
         int total_truck_count;
@@ -137,11 +137,7 @@ Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_detectNative(JNIEnv *env, jc
 
         bool dumping_active;
         int dumping_frame_count;
-
         int dumping_lost_frames;
-
-        int retry_count;
-        int max_retry_count;
 
         long long current_dump_start_time;
         long long truck_load_start_time;
@@ -154,18 +150,12 @@ Java_com_rosenshine_hhd_Excavator_ExcavatorDetector_detectNative(JNIEnv *env, jc
         bool pending_bucket_secured;
         long long secured_dump_start_time;
 
-        cv::Rect last_dumping_box;
-        cv::Rect current_truck_box;
         cv::Rect last_dumping_bucket_box;
 
         cv::Rect ui_bucket_box;
         cv::Rect ui_truck_box;
-
         std::vector<BBox> ui_all_detections;
 
-        int stable_frames_remaining;
-        bool is_statting;
-        int stat_frames_remaining;
         std::vector<float> ratio_buffer;
         float last_avg_ratio;
 

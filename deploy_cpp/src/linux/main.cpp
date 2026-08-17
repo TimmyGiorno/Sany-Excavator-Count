@@ -58,10 +58,7 @@ struct PipelineState {
 
     bool dumping_active;
     int dumping_frame_count;
-    int dumping_lost_frames = 0;
-
-    int retry_count;
-    int max_retry_count;
+    int dumping_lost_frames;
 
     long long current_dump_start_time;
     long long truck_load_start_time;
@@ -74,17 +71,12 @@ struct PipelineState {
     bool pending_bucket_secured;
     long long secured_dump_start_time;
 
-    cv::Rect last_dumping_box;
-    cv::Rect current_truck_box;
     cv::Rect last_dumping_bucket_box;
 
     cv::Rect ui_bucket_box;
     cv::Rect ui_truck_box;
-    std::vector<BBox> ui_all_detections; // 【新增】全量检测框
+    std::vector<BBox> ui_all_detections;
 
-    int stable_frames_remaining;
-    bool is_statting;
-    int stat_frames_remaining;
     std::vector<float> ratio_buffer;
     float last_avg_ratio;
 
